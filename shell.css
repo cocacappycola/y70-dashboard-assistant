@@ -335,13 +335,28 @@ body.keyboard-mode #topbar .grip { opacity: 0; }
 
 /* ---------- App area ---------- */
 #appframe { flex: 1; min-height: 0; position: relative; background: var(--t-bg, #000); }
-/* Every opened app stays mounted; only the active one is visible and hittable.
-   opacity (not display:none) keeps background audio alive. */
+/* Every opened app stays mounted, in one layer over the whole shell, laid over
+   its slot by shell.js (the main area, a dock panel, the whole screen).
+   Only the ones on screen are visible and hittable; opacity (not
+   display:none) keeps background audio alive. Below the drawer and the island. */
+#app-layer { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
 .app-frame {
-  position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block;
+  position: absolute; left: 0; top: 0; width: 0; height: 0; border: 0; display: block;
   opacity: 0; pointer-events: none; z-index: 0;
 }
 .app-frame.active { opacity: 1; pointer-events: auto; z-index: 1; }
+
+/* Focus: one app, the whole screen; the widgets drop away. */
+body.focus #dock { display: none; }
+/* No main app: the dock has the screen. */
+body.no-main #appframe { display: none; }
+body.no-main #dock { flex: 1 1 auto; min-height: 0; max-height: none; }
+
+#focus-exit {
+  height: 18px; padding: 0 9px; border-radius: var(--r-pill, 999px); border: 1px solid var(--trim-line);
+  background: var(--trim-soft); color: var(--text); font-size: 11px; font-weight: 700; cursor: pointer;
+}
+#focus-exit[hidden] { display: none; }
 
 /* ---------- Mini player (auto-shown when leaving Spotify mid-playback) ------ */
 #mini-panel { flex-shrink: 0; height: 60px; border-top: 1px solid var(--trim-line); }
@@ -350,7 +365,16 @@ body.keyboard-mode #topbar .grip { opacity: 0; }
 #shell.shielded iframe { pointer-events: none; }
 
 /* ---------- Bottom widget dock ---------- */
-#dock { flex-shrink: 0; display: flex; flex-direction: column; }
+/* Never taller than the screen less a fifth for the main app: past that it
+   scrolls rather than pushing panels off the bottom. */
+#dock {
+  flex-shrink: 0; display: flex; flex-direction: column;
+  max-height: calc(100vh - var(--topbar-h) - 20vh); overflow-y: auto;
+}
+#dock::-webkit-scrollbar { width: 4px; height: 0; }
+#dock::-webkit-scrollbar-thumb { background: var(--trim-dim); border-radius: 2px; }
+#dock::-webkit-scrollbar-button { display: none; }
+#dock > * { flex-shrink: 0; }
 
 .panel { display: flex; flex-direction: column; background: var(--bg); }
 .panel-bar {
@@ -369,3 +393,12 @@ body.keyboard-mode #topbar .grip { opacity: 0; }
 .panel-collapse:active { background: var(--panel-2); }
 .panel iframe { width: 100%; border: 0; display: block; flex: 1; min-height: 0; background: var(--t-bg-2, #101014); }
 .panel.collapsed iframe { display: none; }
+/* An app docked as a panel: its frame is laid over this box. */
+.panel-slot { flex: 1; min-height: 0; background: #000; }
+.panel.collapsed .panel-slot { display: none; }
+.panel-btn {
+  background: transparent; border: none; color: var(--sub); font-size: 13px;
+  width: 30px; height: 26px; cursor: pointer; border-radius: var(--r-sm);
+}
+.panel-btn:active { background: var(--panel-2); }
+.wrow.app-row .wname { color: var(--sub); }

@@ -421,4 +421,45 @@ async function weather(place, days, home) {
   };
 }
 
-module.exports = { webSearch, imageSearch, readPage, weather, geocode, hostOf };
+// ---- YouTube ---------------------------------------------------------------------
+// YouTube's own results page, key-less: the list is in the page as
+// `var ytInitialData = {...}` (measured: ~1.4 MB, 0.8 s, videoRenderer entries
+// with id, title, channel, length, views, age).
+async function youtubeSearch(query, count) {
+  const q = String(query || "").trim();
+  if (!q) return { ok: false, error: "nothing to search for" };
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 10000);
+  try {
+    const r = await fetch("https://www.youtube.com/results?search_query=" + encodeURIComponent(q) + "&hl=en&gl=US", {
+      signal: ctl.signal,
+      headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
+    });
+    const html = await r.text();
+    const m = html.match(/var ytInitialData = (\{[\s\S]*?\});<\/script>/);
+    if (!m) return { ok: false, error: "YouTube didn't return results (HTTP " + r.status + ")" };
+    const data = JSON.parse(m[1]);
+    const txt = (x) => x && (x.simpleText || (x.runs || []).map((y) => y.text).join(""));
+    const out = [];
+    (function walk(o) {
+      if (!o || typeof o !== "object" || out.length >= (count || 6)) return;
+      if (o.videoRenderer && o.videoRenderer.videoId) {
+        const v = o.videoRenderer;
+        const live = (v.badges || []).some((b) => /LIVE/i.test(JSON.stringify(b))) || !v.lengthText;
+        out.push({
+          id: v.videoId, title: txt(v.title), channel: txt(v.ownerText), length: txt(v.lengthText) || (live ? "live" : null),
+          views: txt(v.viewCountText) || txt(v.shortViewCountText) || null, age: txt(v.publishedTimeText) || null,
+          url: "https://www.youtube.com/watch?v=" + v.videoId,
+          image: "https://i.ytimg.com/vi/" + v.videoId + "/hqdefault.jpg",
+        });
+        return;
+      }
+      for (const k of Object.keys(o)) walk(o[k]);
+    })(data);
+    return out.length ? { ok: true, query: q, results: out } : { ok: false, error: "no videos for " + q };
+  } catch (e) {
+    return { ok: false, error: e.name === "AbortError" ? "YouTube took too long" : e.message };
+  } finally { clearTimeout(t); }
+}
+
+module.exports = { webSearch, imageSearch, readPage, weather, geocode, hostOf, youtubeSearch };

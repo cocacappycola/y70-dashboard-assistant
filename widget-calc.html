@@ -283,6 +283,18 @@
       press(k);
     });
 
+    // Jarvis putting a sum on the calculator: the expression, then = (unless
+    // he only wants it typed in). No brackets here, same as the keypad.
+    addEventListener("message", (e) => {
+      const d = e.data;
+      if (!d || d.type !== "y70:calc" || typeof d.expr !== "string") return;
+      expr = d.expr.replace(/\s+/g, "").replace(/[*xX]/g, "×").replace(/\//g, "÷").replace(/-/g, "−").replace(/[^0-9.%+−×÷]/g, "");
+      hist = "";
+      justSolved = false;
+      render();
+      if (d.solve !== false && expr) press("=");
+    });
+
     render();
   </script>
 </body>

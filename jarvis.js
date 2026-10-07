@@ -876,6 +876,8 @@
     }
     const ts = Timers.all().filter((t) => Timers.left(t) > 0);
     if (ts.length) c.timers = ts.map((t) => t.name + " with " + human(Timers.left(t) / 1000) + " left").join(", ");
+    // What is on the panel right now, so "make it bigger" has an "it".
+    try { c.screen = describeScreen(); } catch (e) {}
     return c;
   }
 
@@ -934,6 +936,7 @@
             case "card": J.cards.push(ev.card); break;
             case "client": clientCalls = ev.calls; break;
             case "memory": if (jarvisViewOpen()) loadFacts(); break;
+            case "notes": showNotes(ev.flash); break;
             case "done": J.convAt = Date.now(); break;
             case "error":
               J.reply += (J.reply ? " " : "") + ev.message;
@@ -1024,6 +1027,8 @@
         renderJarvis();
         return "It's on the screen.";
       case "panel": return panelTool(a);
+      case "layout": return layoutTool(a);
+      case "youtube": return youtubeTool(a);
       case "open_app":
         if (!APPS[a.app]) return "There's no app called " + a.app + ".";
         setApp(a.app);
@@ -1180,6 +1185,271 @@
         return label + " is " + onOff(on) + ".";
       }
       default: return "Unknown panel action " + a.action + ".";
+    }
+  }
+
+  // ------------------------------------------------------------ the screen ---
+  // What every panel is for, so "put something useful under the video" has
+  // an answer.
+  const CAPS = {
+    claude: "Claude Code usage: tokens and cost today, this month, a 7-day chart",
+    weather: "weather at home now, with a clock",
+    pc: "live CPU, GPU, memory and network graphs, the busiest programs",
+    calc: "a calculator (layout calculator puts a sum on it)",
+    media: "what is playing on the PC, any app, with play/pause/skip",
+    lyrics: "synced lyrics of the song playing; tap a line to jump there",
+    audio: "speakers, microphone and per-program volume sliders",
+    timer: "timers and alarms (Jarvis's timers show here)",
+    notes: "notes and lists, formatted (the notes tool writes and edits them)",
+    discord: "Discord voice: the channel, who is talking, mute and deafen",
+    face: "the webcam",
+    pin: "holds another program's window on the panel, e.g. a Discord or Snapchat call (layout pin)",
+    "app:spotify": "Spotify: library, search, playlists, queue",
+    "app:weather": "the full weather app with a radar map",
+    "app:youtube": "YouTube (the youtube tool plays videos, just the video if asked)",
+    "app:shorts": "YouTube Shorts, a feed with auto-scroll",
+    "app:tiktok": "TikTok, a feed with auto-scroll",
+    "app:snapchat": "Snapchat for web",
+    "app:web": "any web page (open_web)",
+  };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // "youtube", "the PC stats", "weather app" -> a panel key. "weather" is both a
+  // widget and an app: the one on screen wins, the app if the words say app.
+  function panelKeyFor(name) {
+    const raw = String(name || "").toLowerCase();
+    const n = raw.replace(/\b(the|my|widget|panel|app)\b/g, "").replace(/\s+/g, " ").trim();
+    if (!n) return null;
+    const wantsApp = /\bapp\b/.test(raw);
+    const widgets = Object.keys(WIDGETS), apps = Object.keys(APPS);
+    const w = widgets.find((k) => k === n) || widgets.find((k) => WIDGETS[k].title.toLowerCase() === n) ||
+      widgets.find((k) => WIDGETS[k].title.toLowerCase().includes(n) || n.includes(k));
+    const ap = apps.find((k) => k === n) || apps.find((k) => APPS[k].title.toLowerCase() === n);
+    if (w && ap) {
+      const wOn = state.widgets[w] && state.widgets[w].on;
+      return wantsApp || (isDocked(ap) && !wOn) || (state.app === ap && !wOn) ? "app:" + ap : w;
+    }
+    return ap ? "app:" + ap : w || null;
+  }
+  const keyTitle = (k) => (panelDef(k) ? panelDef(k).title + (isAppKey(k) ? " app" : "") : k);
+  function heightFor(a, key) {
+    const H = window.innerHeight;
+    if (a.height) return Number(a.height);
+    const f = { small: 0.2, medium: 0.33, large: 0.55, half: 0.5 }[a.size];
+    return f ? Math.round(H * f) : null;
+  }
+  function positionFor(a) {
+    if (a.before) { const k = panelKeyFor(a.before); if (k) return { before: k }; }
+    if (a.after) { const k = panelKeyFor(a.after); if (k) return { after: k }; }
+    if (a.position == null || a.position === "") return null;
+    return /^\d+$/.test(String(a.position)) ? Number(a.position) : String(a.position).toLowerCase();
+  }
+  // A widget's frame, made and loaded if it has to be.
+  async function widgetFrame(key) {
+    const w = state.widgets[key] || (state.widgets[key] = { on: false, h: null, collapsed: false });
+    const fresh = !w.on;
+    w.on = true; w.collapsed = false;
+    // Into the room that is left, not off the bottom of the screen.
+    if (fresh) w.h = Math.max(MIN_H, Math.min(w.h || defaultH(key), dockRoom(key)));
+    save(); renderDock();
+    const panel = document.querySelector('#dock .panel[data-key="' + key + '"]');
+    if (panel) panel.scrollIntoView({ block: "nearest" });
+    const f = panel && panel.querySelector("iframe");
+    if (f && fresh) await new Promise((r) => { f.addEventListener("load", r, { once: true }); setTimeout(r, 4000); });
+    return f;
+  }
+  function frameAsk(f, msg, replyType, ms) {
+    return new Promise((resolve) => {
+      const id = "l" + Date.now() + Math.random().toString(36).slice(2, 5);
+      const onMsg = (e) => { if (e.data && e.data.type === replyType && e.data.id === id) { removeEventListener("message", onMsg); resolve(e.data); } };
+      addEventListener("message", onMsg);
+      try { f.contentWindow.postMessage({ ...msg, id }, "*"); } catch (e) {}
+      setTimeout(() => { removeEventListener("message", onMsg); resolve(null); }, ms || 8000);
+    });
+  }
+
+  // The Notes widget, open and showing what Jarvis just changed.
+  async function showNotes(flash) {
+    const f = await widgetFrame("notes");
+    try { f && f.contentWindow.postMessage({ type: "y70:notes-reload", flash: flash || [] }, "*"); } catch (e) {}
+  }
+
+  async function layoutTool(a) {
+    const app = (x) => { const n = String(x || "").toLowerCase().replace(/\b(the|app)\b/g, "").trim(); return Object.keys(APPS).find((k) => k === n || APPS[k].title.toLowerCase() === n) || null; };
+    switch (a.action) {
+      case "status": {
+        const s = layoutSnapshot();
+        return JSON.stringify({
+          ...s,
+          panels: s.panels.map((p) => ({ ...p, does: CAPS[p.key] })),
+          hiddenWidgets: s.hiddenWidgets.map((k) => k + ": " + CAPS[k]),
+          apps: Object.keys(APPS).map((k) => k + (k === (s.main && s.main.app) ? " (main)" : isDocked(k) ? " (in a panel)" : "") + ": " + CAPS["app:" + k]),
+          scenes: SCENES.map((x) => x.id + (state.sceneEdits[x.id] ? " (saved by the user)" : "")),
+        });
+      }
+      case "open": {
+        const n = app(a.app || a.name);
+        if (!n) return "Apps: " + Object.keys(APPS).join(", ") + ".";
+        closeCard(); setApp(n);
+        return "Opened " + APPS[n].title + " in the main area.";
+      }
+      case "focus": {
+        const n = app(a.app || a.name) || (focus && focus.app) || state.app;
+        if (!n) return "Which app?";
+        closeCard(); setFocus(n);
+        return APPS[n].title + " has the whole screen; the widgets are hidden until exit_focus (or the Exit chip in the top bar).";
+      }
+      case "exit_focus":
+        return clearFocus() ? "Back to the layout: " + describeScreen() : "Nothing was full screen.";
+      case "home":
+        clearFocus(true); applyScene("home");
+        return "Home layout: " + describeScreen();
+      case "save_home":
+        saveScene("home");
+        return "Saved what is on screen as Home: " + describeScreen();
+      case "widget": {
+        const key = panelKeyFor(a.name);
+        if (!key || isAppKey(key)) return "Widgets: " + Object.keys(WIDGETS).join(", ") + ".";
+        const w = state.widgets[key] || (state.widgets[key] = { on: false, h: null, collapsed: false });
+        w.on = a.on == null ? !w.on : !!a.on;
+        if (w.on) w.collapsed = false;
+        save(); renderDock();
+        return WIDGETS[key].title + " widget " + (w.on ? "shown" : "hidden") + ". Now: " + describeScreen();
+      }
+      case "dock": {
+        const n = app(a.app || a.name);
+        if (!n) return "Apps: " + Object.keys(APPS).join(", ") + ".";
+        dockApp(n, { h: heightFor(a, "app:" + n), position: positionFor(a) });
+        return APPS[n].title + " is in a panel now. " + describeScreen();
+      }
+      case "undock": {
+        const n = app(a.app || a.name);
+        if (!n || !undockApp(n)) return (n ? APPS[n].title : "That") + " isn't in a panel.";
+        return APPS[n].title + "'s panel is closed. " + describeScreen();
+      }
+      case "resize": {
+        const key = panelKeyFor(a.name || a.app);
+        if (!key) return "Which panel? " + describeScreen();
+        if (isAppKey(key) && state.app === appOf(key) && !isDocked(appOf(key))) {
+          return APPS[appOf(key)].title + " is the main app: it takes whatever the panels leave. Make the panels smaller, focus it, or dock it to size it.";
+        }
+        const h = heightFor(a, key);
+        if (!h) return "How big? Give height in pixels or size small/medium/large/half.";
+        if (!(state.widgets[key] && state.widgets[key].on)) {
+          if (isAppKey(key)) dockApp(appOf(key)); else { state.widgets[key] = { ...(state.widgets[key] || {}), on: true, collapsed: false }; }
+        }
+        const got = resizePanel(key, h);
+        return keyTitle(key) + " is " + got + " px tall now (the screen is " + window.innerHeight + ").";
+      }
+      case "move": {
+        const key = panelKeyFor(a.name || a.app);
+        const pos = positionFor(a);
+        if (!key || pos == null) return "Which panel, and where (top, bottom, a number, or before/after another)?";
+        if (!(state.widgets[key] && state.widgets[key].on)) return keyTitle(key) + " isn't on screen. Show or dock it first.";
+        movePanel(key, pos);
+        return "Moved. " + describeScreen();
+      }
+      case "collapse":
+      case "expand": {
+        const key = panelKeyFor(a.name || a.app);
+        const w = key && state.widgets[key];
+        if (!w || !w.on) return "That panel isn't on screen. " + describeScreen();
+        w.collapsed = a.action === "collapse";
+        save(); renderDock();
+        return keyTitle(key) + (w.collapsed ? " collapsed to its bar." : " expanded.");
+      }
+      case "scene": {
+        const q = String(a.name || "").toLowerCase();
+        const sc = SCENES.find((x) => x.id === q) || SCENES.find((x) => q && x.name.toLowerCase().includes(q));
+        if (!sc) return "Scenes: " + SCENES.map((x) => x.name).join(", ") + ".";
+        closeCard(); applyScene(sc.id);
+        return sc.name + " layout: " + describeScreen();
+      }
+      case "save_scene": {
+        const q = String(a.name || "").toLowerCase();
+        const sc = SCENES.find((x) => x.id === q) || SCENES.find((x) => q && x.name.toLowerCase().includes(q));
+        if (!sc) return "Scenes: " + SCENES.map((x) => x.name).join(", ") + ".";
+        saveScene(sc.id);
+        return "Saved what is on screen as " + sc.name + ".";
+      }
+      case "calculator": {
+        if (!a.expression) return "What should it work out?";
+        const f = await widgetFrame("calc");
+        if (!f) return "Couldn't open the calculator.";
+        try { f.contentWindow.postMessage({ type: "y70:calc", expr: String(a.expression) }, "*"); } catch (e) {}
+        return "It's on the calculator.";
+      }
+      case "pin":
+      case "unpin": {
+        const f = await widgetFrame("pin");
+        if (!f) return "Couldn't open the pin widget.";
+        const r = await frameAsk(f, a.action === "pin" ? { type: "y70:pin-use", match: a.window || a.name || a.app } : { type: "y70:pin-release" }, "y70:pin-done");
+        if (!r) return "The pin widget didn't answer.";
+        if (!r.ok) return r.error;
+        return a.action === "pin" ? "Holding " + (r.process || "") + " (" + r.title + ") in the pin widget." : "Let it go.";
+      }
+      default: return "Unknown layout action " + a.action + ".";
+    }
+  }
+
+  // ------------------------------------------------------------- YouTube ----
+  function ytId(s) {
+    const t = String(s || "").trim();
+    const m = t.match(/(?:v=|youtu\.be\/|shorts\/|embed\/)([\w-]{11})/) || t.match(/^([\w-]{11})$/);
+    return m ? m[1] : null;
+  }
+  // Loads a page into the YouTube app's own view (made now if need be).
+  function ytLoad(url) {
+    const existed = !!document.getElementById("app-youtube");
+    if (!existed) {
+      const src = APPS.youtube.src;
+      APPS.youtube.src = src + "&url=" + encodeURIComponent(url);
+      appFrame("youtube");
+      APPS.youtube.src = src;
+      return;
+    }
+    try { document.getElementById("app-youtube").contentWindow.postMessage({ type: "y70:web-open", url }, "*"); } catch (e) {}
+  }
+  async function youtubeTool(a) {
+    const yt = () => document.getElementById("app-youtube");
+    switch (a.action) {
+      case "play": {
+        let id = ytId(a.url) || ytId(a.query), title = null, info = "";
+        if (!id) {
+          if (!a.query) return "What should I play?";
+          const r = await fetch(API + "youtube?q=" + encodeURIComponent(a.query)).then((x) => x.json()).catch((e) => ({ ok: false, error: e.message }));
+          if (!r.ok) return "Couldn't search YouTube: " + r.error;
+          const v = r.results[0];
+          id = v.id; title = v.title;
+          info = " by " + v.channel + (v.length ? " (" + v.length + ")" : "");
+          J.cards.push({ kind: "results", query: a.query, items: r.results.slice(0, 4).map((x) => ({ title: x.title, url: x.url, snippet: [x.channel, x.length, x.views].filter(Boolean).join(" · "), image: x.image })) });
+        }
+        const view = a.view || "full";
+        closeCard();
+        ytLoad("https://m.youtube.com/watch?v=" + id);
+        if (view === "full") setFocus("youtube", { video: true });
+        else if (view === "app") setFocus("youtube");
+        else if (view === "panel") { dockApp("youtube", { h: Math.round(window.innerWidth * 9 / 16) + 30 }); sendTheater("youtube", true); }
+        else setApp("youtube");
+        const where = { full: "just the video, full screen (Exit in the top bar, or ask)", app: "the YouTube page, full screen", panel: "just the video, in a panel", normal: "in the main area" }[view] || view;
+        return "Playing " + (title ? "\"" + title + "\"" + info : "that video") + ": " + where + "." + (native ? "" : " (Videos only play in the installed app, not a browser.)");
+      }
+      case "search": {
+        if (!a.query) return "Search for what?";
+        closeCard();
+        ytLoad("https://m.youtube.com/results?search_query=" + encodeURIComponent(a.query));
+        if (!(focus && focus.app === "youtube")) setApp("youtube");
+        return "YouTube's results for " + a.query + " are on the panel.";
+      }
+      case "pause":
+      case "resume": {
+        if (!yt()) return "YouTube isn't open.";
+        try { yt().contentWindow.postMessage({ type: "y70:web-media", what: a.action === "pause" ? "pause" : "play" }, "*"); } catch (e) {}
+        return a.action === "pause" ? "Paused." : "Playing.";
+      }
+      case "exit":
+        return clearFocus() ? "Out of full screen. " + describeScreen() : "Nothing was full screen.";
+      default: return "Unknown youtube action " + a.action + ".";
     }
   }
 

@@ -18,6 +18,7 @@
       <div class="grip"></div>
       <div id="island" aria-live="polite"></div>
       <div class="sb-side sb-right">
+        <button id="focus-exit" hidden title="Leave full screen">⤡ Exit</button>
         <span id="sb-alarm" hidden></span>
         <button id="jv-btn" aria-label="Ask Jarvis"><span class="jv-orb"></span></button>
       </div>
@@ -102,7 +103,7 @@
             <span>Web</span>
           </button>
         </div>
-        <div class="sec-title">Pull-up widgets<span class="sec-hint">drag ☰ to reorder · tap to toggle</span></div>
+        <div class="sec-title">Panels<span class="sec-hint">widgets and apps · drag ☰ to reorder · tap to toggle</span></div>
         <div id="widget-list"></div>
 
         <div class="sec-title native-only">
@@ -214,8 +215,12 @@
          from a background app (Spotify) keeps playing. -->
     <main id="appframe"></main>
 
-    <!-- Bottom widget dock -->
+    <!-- Bottom widget dock. Widgets and docked apps share it. -->
     <div id="dock"></div>
+
+    <!-- Every app frame lives here, laid over its slot (the main area, a dock
+         panel, or the whole screen in focus) so it never moves in the DOM. -->
+    <div id="app-layer"></div>
   </div>
 
   <script src="shell.js"></script>

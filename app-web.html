@@ -49,6 +49,8 @@
       border-bottom: 1px solid var(--v-accent-line, rgba(255,59,92,.4));
     }
     #offer[hidden] { display: none; }
+    /* Just the video: no toolbar, the native view takes the whole frame. */
+    body.theater #bar, body.theater #offer { display: none; }
     #offer .o-text { flex: 1 1 100%; font-size: 13px; line-height: 1.4; }
     #offer .o-text b { display: block; font-size: 14px; margin-bottom: 2px; word-break: break-all; }
     #offer .btn { flex: 1; min-height: var(--h-md); }
@@ -171,6 +173,12 @@
         return;
       }
       if (d && d.type === "y70:web-offer-clear") { if (!d.id || d.id === offerId) { $("offer").hidden = true; offerId = null; place(true); } return; }
+      // The shell moved or resized this frame (docked, focused): follow now
+      // rather than on the next half-second check.
+      if (d && d.type === "y70:web-reposition") { place(true); return; }
+      // Just the video (Jarvis, or the panel's focus mode).
+      if (d && d.type === "y70:web-theater") { setTheater(!!d.on); return; }
+      if (d && d.type === "y70:web-media") { if (native) ask("media", { arg: d.what }); return; }
       if (d && d.type === "y70:web-open" && /^https?:\/\//.test(d.url || "")) {
         startUrl = d.url;
         if (native) ask("load", { arg: d.url }).then(syncNav);
@@ -198,11 +206,22 @@
         visible: !document.hidden,
       }).then((res) => {
         if (res && res.ok) {
+          const first = !native;
           native = true;
           $("msg").style.display = "none";
           if (pendingLoad) { const u = pendingLoad; pendingLoad = null; ask("load", { arg: u }).then(syncNav); }
+          // Theater asked for before the view existed.
+          if (first && theater) ask("theater", { arg: true });
         }
       });
+    }
+
+    let theater = false;
+    function setTheater(on) {
+      theater = on;
+      document.body.classList.toggle("theater", on);
+      place(true);
+      if (native) ask("theater", { arg: on });
     }
 
     // The dock resizes, the drawer opens, the panel rotates: just re-check.

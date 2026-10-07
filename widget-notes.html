@@ -18,17 +18,44 @@
     #wrap { height: 100%; display: flex; flex-direction: column; padding: 10px 12px 8px; gap: 6px; }
     .head { user-select: none; }
 
-    #pad {
-      flex: 1; min-height: 0; width: 100%; resize: none;
+    #pad, #view {
+      flex: 1; min-height: 0; width: 100%;
       background: var(--u-card, rgba(255,255,255,.04));
       border: 1px solid var(--u-card-line, rgba(255,255,255,.09));
       border-radius: var(--r-md); padding: 10px 12px;
-      color: var(--u-text, #f5f2e6); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      color: var(--u-text, #f5f2e6);
+    }
+    #pad {
+      resize: none; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
       font-size: 13px; line-height: 1.55; outline: none;
       -webkit-user-select: text; user-select: text;
     }
     #pad:focus { border-color: var(--u-accent-line, rgba(232,212,77,.45)); }
     #pad::placeholder { color: var(--u-muted, #7d7960); }
+    body.editing #view, body:not(.editing) #pad { display: none; }
+
+    /* ---- The notes, formatted. The file stays plain text (a little markdown). */
+    #view { font-size: 13.5px; line-height: 1.5; cursor: text; }
+    #view .ln { padding: 1px 4px; margin: 0 -4px; border-radius: 6px; min-height: 1.5em; word-wrap: break-word; }
+    #view .ln.blank { min-height: .7em; }
+    #view .h1 { font-size: 17px; font-weight: 750; margin-top: 6px; }
+    #view .h2 { font-size: 15px; font-weight: 700; margin-top: 6px; color: var(--u-accent, #e8d44d); }
+    #view .h3 { font-size: 13.5px; font-weight: 700; margin-top: 4px; text-transform: uppercase; letter-spacing: .05em; color: var(--u-sub, #c9c4a8); }
+    #view .ln:first-child { margin-top: 0; }
+    #view .li { display: flex; gap: 7px; }
+    #view .li .mk { flex-shrink: 0; width: 14px; text-align: center; color: var(--u-accent, #e8d44d); }
+    #view .ck { flex-shrink: 0; width: 17px; height: 17px; margin-top: 1px; border-radius: 5px; cursor: pointer;
+      border: 1.5px solid var(--u-accent-line, rgba(232,212,77,.55)); display: flex; align-items: center; justify-content: center; font-size: 11px; }
+    #view .done .ck { background: var(--u-accent, #e8d44d); color: var(--u-accent-ink, #000); border-color: transparent; }
+    #view .done .tx { opacity: .55; text-decoration: line-through; }
+    #view .quote { border-left: 3px solid var(--u-accent-line, rgba(232,212,77,.45)); padding-left: 9px; color: var(--u-sub, #c9c4a8); }
+    #view .rule { border-top: 1px solid var(--u-card-line, rgba(255,255,255,.12)); margin: 8px 0; min-height: 0; }
+    #view .stamp { font-size: 11px; color: var(--u-muted, #8a856a); margin-top: 6px; }
+    #view code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: rgba(255,255,255,.07); padding: 0 4px; border-radius: 4px; }
+    #view .empty { color: var(--u-muted, #7d7960); }
+    /* Just changed (by Jarvis): a moment of glow. */
+    #view .ln.flash { animation: flash 2.6s ease-out; }
+    @keyframes flash { 0%, 35% { background: var(--u-accent-soft, rgba(232,212,77,.22)); } 100% { background: transparent; } }
   </style>
 </head>
 <body>
@@ -38,21 +65,96 @@
       <div class="label">Notes</div>
       <div class="spacer"></div>
       <div class="note" id="status">…</div>
+      <button class="btn btn--ghost btn--sm" id="mode">Edit</button>
       <button class="btn btn--ghost btn--sm" id="stamp">＋ date</button>
     </div>
-    <textarea id="pad" class="scroll-y" placeholder="Type anything. It saves itself to notes.txt in the dashboard’s data folder." spellcheck="false"></textarea>
+    <div id="view" class="scroll-y"></div>
+    <textarea id="pad" class="scroll-y" placeholder="Type anything. # headings, - bullets, - [ ] checklists and **bold** show formatted." spellcheck="false"></textarea>
   </div>
 
   <script>
     const pad = document.getElementById("pad");
+    const view = document.getElementById("view");
     const status = document.getElementById("status");
+    const modeBtn = document.getElementById("mode");
     let saved = "";        // what the server currently holds
     let saveTimer = null;
     let loaded = false;
+    let rendered = null;   // the text the formatted view last showed
 
     function setStatus(s) { status.textContent = s; }
 
-    async function load() {
+    // ---- Formatting --------------------------------------------------------
+    // Line by line, a little markdown: # ## ### headings, - * bullets (two
+    // spaces of indent per level), - [ ] / - [x] checklists, 1. numbers,
+    // > quotes, --- rules, "— date" stamps; inline **bold**, *italic*,
+    // `code`, ~~strike~~.
+    const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    function inline(s) {
+      return esc(s)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+        .replace(/~~([^~]+)~~/g, "<s>$1</s>")
+        .replace(/(^|[\s(])[*_]([^*_\s][^*_]*)[*_](?=[\s).,!?:;]|$)/g, "$1<i>$2</i>");
+    }
+    function render(flash) {
+      rendered = pad.value;
+      const lines = pad.value.split("\n");
+      const out = [];
+      if (!pad.value.trim()) out.push('<div class="ln empty">Nothing here yet. Tap to write, or ask Jarvis.</div>');
+      else lines.forEach((raw, i) => {
+        const indent = (raw.match(/^ */)[0].length >> 1) * 16;
+        const t = raw.trim();
+        const pad0 = indent ? ' style="padding-left:' + (indent + 4) + 'px"' : "";
+        let m;
+        if (!t) out.push('<div class="ln blank" data-i="' + i + '"></div>');
+        else if ((m = t.match(/^(#{1,3})\s+(.*)$/))) out.push('<div class="ln h' + m[1].length + '" data-i="' + i + '">' + inline(m[2]) + "</div>");
+        else if ((m = t.match(/^[-*]\s+\[([ xX])\]\s*(.*)$/))) {
+          const done = m[1] !== " ";
+          out.push('<div class="ln li' + (done ? " done" : "") + '" data-i="' + i + '"' + pad0 + '><span class="ck" data-check="' + i + '">' + (done ? "✓" : "") + '</span><span class="tx">' + inline(m[2]) + "</span></div>");
+        }
+        else if ((m = t.match(/^[-*•]\s+(.*)$/))) out.push('<div class="ln li" data-i="' + i + '"' + pad0 + '><span class="mk">•</span><span class="tx">' + inline(m[1]) + "</span></div>");
+        else if ((m = t.match(/^(\d+)[.)]\s+(.*)$/))) out.push('<div class="ln li" data-i="' + i + '"' + pad0 + '><span class="mk">' + m[1] + '.</span><span class="tx">' + inline(m[2]) + "</span></div>");
+        else if ((m = t.match(/^>\s?(.*)$/))) out.push('<div class="ln quote" data-i="' + i + '">' + inline(m[1]) + "</div>");
+        else if (/^(-{3,}|\*{3,})$/.test(t)) out.push('<div class="ln rule" data-i="' + i + '"></div>');
+        else if (/^—\s/.test(t)) out.push('<div class="ln stamp" data-i="' + i + '">' + esc(t) + "</div>");
+        else out.push('<div class="ln" data-i="' + i + '"' + pad0 + ">" + inline(t) + "</div>");
+      });
+      view.innerHTML = out.join("");
+      if (flash && flash.length) {
+        let first = null;
+        for (const i of flash) {
+          const el = view.querySelector('.ln[data-i="' + i + '"]');
+          if (el) { el.classList.add("flash"); first = first || el; }
+        }
+        if (first) first.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }
+
+    // Tapping a box ticks it, right in the file.
+    view.addEventListener("pointerup", (e) => {
+      const ck = e.target.closest("[data-check]");
+      if (ck) {
+        const i = Number(ck.dataset.check);
+        const lines = pad.value.split("\n");
+        lines[i] = lines[i].replace(/\[([ xX])\]/, (_, c) => (c === " " ? "[x]" : "[ ]"));
+        pad.value = lines.join("\n");
+        render();
+        clearTimeout(saveTimer);
+        save();
+        return;
+      }
+      setEditing(true);
+    });
+
+    function setEditing(on) {
+      document.body.classList.toggle("editing", on);
+      modeBtn.textContent = on ? "Done" : "Edit";
+      if (on) pad.focus(); else render();
+    }
+    modeBtn.addEventListener("pointerup", () => setEditing(!document.body.classList.contains("editing")));
+
+    async function load(flash) {
       try {
         const d = await (await fetch("/api/notes")).json();
         // Never clobber something the user has already started typing.
@@ -64,6 +166,8 @@
         saved = d.text || "";
         loaded = true;
         setStatus(saved ? "saved" : "empty");
+        // The 10-second check re-renders only when something changed.
+        if (!document.body.classList.contains("editing") && (flash || pad.value !== rendered)) render(flash);
       } catch (e) {
         setStatus("offline");
       }
@@ -98,7 +202,11 @@
       try { window.parent.postMessage({ type: "y70:keyboard", on }, "*"); } catch (e) {}
     }
     pad.addEventListener("focus", () => askKeyboard(true));
-    pad.addEventListener("blur", () => { askKeyboard(false); clearTimeout(saveTimer); save(); });
+    pad.addEventListener("blur", () => {
+      askKeyboard(false); clearTimeout(saveTimer); save();
+      // Back to the formatted view, unless the tap went to the mode button.
+      setTimeout(() => { if (document.activeElement !== pad) setEditing(false); }, 150);
+    });
     window.addEventListener("pagehide", () => {
       if (pad.value === saved) return;
       // Fire-and-forget on teardown; fetch would be cancelled.
@@ -111,6 +219,7 @@
       const d = new Date();
       const stamp = d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }) +
         " " + d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      if (!document.body.classList.contains("editing")) setEditing(true);
       const at = pad.selectionStart ?? pad.value.length;
       const pre = pad.value.slice(0, at), post = pad.value.slice(at);
       const insert = (pre && !pre.endsWith("\n") ? "\n" : "") + "— " + stamp + "\n";
@@ -119,6 +228,12 @@
       pad.setSelectionRange(pre.length + insert.length, pre.length + insert.length);
       clearTimeout(saveTimer);
       saveTimer = setTimeout(save, 400);
+    });
+
+    // Jarvis changed the notes: show them now, and which lines are new.
+    window.addEventListener("message", (e) => {
+      const d = e.data;
+      if (d && d.type === "y70:notes-reload") load(Array.isArray(d.flash) ? d.flash : null);
     });
 
     load();

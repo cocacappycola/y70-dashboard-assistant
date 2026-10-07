@@ -3,16 +3,17 @@
 // ============================================================================
 
 const APPS = {
-  spotify: { title: "Spotify", src: "/index.html" },
-  weather: { title: "Weather", src: "/weather-app.html" },
-  youtube: { title: "YouTube", src: "/app-web.html?site=youtube" },
-  shorts: { title: "Shorts", src: "/app-web.html?site=shorts" },
-  tiktok: { title: "TikTok", src: "/app-web.html?site=tiktok" },
-  snapchat: { title: "Snapchat", src: "/app-web.html?site=snapchat" },
+  spotify: { title: "Spotify", src: "/index.html", ico: "media-ico", glyph: "♫" },
+  weather: { title: "Weather", src: "/weather-app.html", ico: "weather-ico", glyph: "☀" },
+  youtube: { title: "YouTube", src: "/app-web.html?site=youtube", ico: "web-ico", glyph: "▶" },
+  shorts: { title: "Shorts", src: "/app-web.html?site=shorts", ico: "web-ico", glyph: "⬛" },
+  tiktok: { title: "TikTok", src: "/app-web.html?site=tiktok", ico: "web-ico", glyph: "♪" },
+  snapchat: { title: "Snapchat", src: "/app-web.html?site=snapchat", ico: "web-ico", glyph: "👻" },
   // Any page Jarvis opens for you (a model's Hugging Face page, a link from a
   // search), in the same kind of native view as the apps above.
-  web: { title: "Web", src: "/app-web.html?site=web" },
+  web: { title: "Web", src: "/app-web.html?site=web", ico: "web-ico", glyph: "🌐" },
 };
+const WEB_APPS = /^(youtube|shorts|tiktok|snapchat|web)$/;
 
 const WIDGETS = {
   claude: { title: "Claude", src: "/widget-claude.html", ico: "claude-ico", glyph: "✳" },
@@ -34,6 +35,12 @@ const WIDGETS = {
 // at what heights. These four ship with the app; each can be overwritten with
 // whatever you have on screen, and reset back to this again.
 const SCENES = [
+  // Home is where "Jarvis, go home" and leaving a full-screen video come back
+  // to. Packed as the first-run layout; save over it to make it yours.
+  {
+    id: "home", name: "Home", icon: "\u2302", app: "spotify",
+    widgets: { claude: {} },
+  },
   {
     id: "working", name: "Working", icon: "\u2328", app: "spotify",
     widgets: { pc: { h: 330 }, notes: { h: 260 }, timer: { h: 190 } },
@@ -54,6 +61,14 @@ const SCENES = [
 const sceneById = (id) => SCENES.find((s) => s.id === id);
 
 const $ = (s) => document.querySelector(s);
+
+// ---- One plane for widgets and apps ------------------------------------------
+// The dock holds panels. A panel is a widget ("pc") or an app docked beside
+// them ("app:youtube"): same bar, same drag-to-resize, same order, same scenes.
+const isAppKey = (k) => typeof k === "string" && k.startsWith("app:");
+const appOf = (k) => k.slice(4);
+const panelDef = (k) => (isAppKey(k) ? APPS[appOf(k)] && { ...APPS[appOf(k)], app: appOf(k) } : WIDGETS[k]);
+const panelKeys = () => Object.keys(WIDGETS).concat(Object.keys(APPS).map((a) => "app:" + a));
 
 // ---- persisted state -------------------------------------------------------
 const DEFAULT_STATE = {
@@ -90,24 +105,30 @@ try {
 
 function save() { localStorage.setItem("y70shell", JSON.stringify(state)); }
 
-// Keeps a saved order usable across versions: drop widgets that no longer
+// Keeps a saved order usable across versions: drop panels that no longer
 // exist, and append any that were added since it was written.
 function normalizeOrder(order) {
-  const known = Object.keys(WIDGETS);
+  const known = panelKeys();
   const kept = (Array.isArray(order) ? order : []).filter((n) => known.includes(n));
   return kept.concat(known.filter((n) => !kept.includes(n)));
 }
 
-// Default panel height: a 16:9 chunk of the screen width, capped at 40% of height.
-function defaultH() {
-  return Math.min(Math.round(window.innerWidth * 9 / 16), Math.round(window.innerHeight * 0.4));
+// Default panel height: a 16:9 chunk of the screen width, capped at 40% of
+// height. An app docked as a panel gets the 16:9 picture plus its bar.
+function defaultH(key) {
+  const w = window.innerWidth;
+  if (isAppKey(key)) return Math.min(Math.round(w * 9 / 16) + 30, Math.round(window.innerHeight * 0.6));
+  return Math.min(Math.round(w * 9 / 16), Math.round(window.innerHeight * 0.4));
 }
 const MIN_H = 80;
-const maxH = () => Math.round(window.innerHeight * 0.55);
+const maxH = (key) => Math.round(window.innerHeight * (isAppKey(key) ? 0.85 : 0.55));
 
 // ---- app switching ---------------------------------------------------------
 // Apps stay mounted once opened and are only hidden — tearing the iframe down
-// would kill the Spotify Web Playback SDK and stop the music.
+// would kill the Spotify Web Playback SDK and stop the music. So an app frame
+// never moves in the DOM: every one lives in #app-layer and is laid over
+// whichever slot shows it — the main area, a dock panel, or the whole screen
+// in focus (layoutApps). Moving an iframe in the DOM would reload it.
 function appFrame(name) {
   let f = document.getElementById("app-" + name);
   if (!f) {
@@ -116,65 +137,338 @@ function appFrame(name) {
     f.className = "app-frame";
     f.title = APPS[name].title;
     f.src = APPS[name].src;
-    $("#appframe").appendChild(f);
+    f.addEventListener("load", () => { f.dataset.loaded = "1"; });
+    $("#app-layer").appendChild(f);
   }
   return f;
 }
 
+const isDocked = (name) => !!(state.widgets["app:" + name] && state.widgets["app:" + name].on);
+
+// The main app. null leaves the main area empty and gives the dock the screen.
 function setApp(name) {
-  if (!APPS[name]) return;
+  if (name !== null && !APPS[name]) return;
+  // Asking for an app (a tile, Jarvis) ends any full-screen focus on another.
+  if (focus && focus.app !== name) clearFocus(true);
+  // Up in the main area an app shows its whole page again.
+  if (name && theaterOn.has(name) && !focus) sendTheater(name, false);
+  if (name && isDocked(name)) {
+    // Opening a docked app brings it back up to the main area.
+    state.widgets["app:" + name].on = false;
+    renderDock();
+  }
+  if (state.app && state.app !== name) state.prevApp = state.app;
   state.app = name;
   save();
-  appFrame(name);
-  for (const key of Object.keys(APPS)) {
-    const f = document.getElementById("app-" + key);
-    if (f) f.classList.toggle("active", key === name);
-  }
+  if (name) appFrame(name);
+  document.body.classList.toggle("no-main", !name && !focus);
   document.querySelectorAll(".app-tile").forEach((t) =>
     t.classList.toggle("active", t.dataset.app === name));
+  layoutApps();
   syncWebViews();
   renderMini();
 }
 
-// ---- widget dock -----------------------------------------------------------
-function renderDock() {
-  const dock = $("#dock");
-  dock.innerHTML = "";
-  for (const name of normalizeOrder(state.order)) {
-    const def = WIDGETS[name];
-    const w = state.widgets[name];
+// ---- layout: where each app frame sits ------------------------------------------
+let focus = null;          // { app, video } while one app has the whole screen
+
+// app -> the element whose box it should cover, for every app on screen.
+function appSlots() {
+  const slots = new Map();
+  if (focus) { slots.set(focus.app, $("#appframe")); return slots; }
+  if (state.app && !isDocked(state.app)) slots.set(state.app, $("#appframe"));
+  document.querySelectorAll("#dock .panel[data-app]").forEach((p) => {
+    if (!p.classList.contains("collapsed")) slots.set(p.dataset.app, p.querySelector(".panel-slot"));
+  });
+  return slots;
+}
+
+function layoutApps() {
+  const shell = $("#shell").getBoundingClientRect();
+  const main = $("#appframe").getBoundingClientRect();
+  const slots = appSlots();
+  const place = (f, r) => {
+    f.style.left = (r.left - shell.left) + "px";
+    f.style.top = (r.top - shell.top) + "px";
+    f.style.width = Math.max(0, r.width) + "px";
+    f.style.height = Math.max(0, r.height) + "px";
+  };
+  // A dock taller than its room scrolls; a frame over a panel is clipped to
+  // what the dock shows (clip-path for the iframe; the shell clips a native
+  // view the same way when it is placed, from data-vis-top/bottom).
+  const dockBox = $("#dock").getBoundingClientRect();
+  for (const name of Object.keys(APPS)) {
+    let slot = slots.get(name);
+    const f = slot ? appFrame(name) : document.getElementById("app-" + name);
+    if (!f) continue;
+    const was = f.classList.contains("active");
+    const r = slot ? slot.getBoundingClientRect() : main;
+    const inDock = !!(slot && slot.classList.contains("panel-slot"));
+    const visTop = inDock ? Math.max(r.top, dockBox.top) : r.top;
+    const visBottom = inDock ? Math.min(r.bottom, dockBox.bottom) : r.bottom;
+    if (inDock && visBottom - visTop < 24) slot = null;    // scrolled out of sight
+    // Off-screen apps keep the main area's size, so they lay themselves out
+    // sensibly while hidden (and Spotify keeps playing).
+    place(f, slot ? r : main);
+    f.style.clipPath = slot && inDock && (visTop > r.top || visBottom < r.bottom)
+      ? "inset(" + Math.round(visTop - r.top) + "px 0 " + Math.round(r.bottom - visBottom) + "px 0)" : "";
+    if (slot) { f.dataset.visTop = String(Math.round(visTop)); f.dataset.visBottom = String(Math.round(visBottom)); }
+    f.classList.toggle("active", !!slot);
+    // A web app's native view follows its frame; tell it now, not in 500 ms.
+    if (WEB_APPS.test(name) && (slot || was)) {
+      try { f.contentWindow.postMessage({ type: "y70:web-reposition" }, "*"); } catch (e) {}
+    }
+  }
+}
+
+// Next frame, or 50 ms if frames aren't being drawn (a hidden window).
+let layoutQueued = false;
+function scheduleLayout() {
+  if (layoutQueued) return;
+  layoutQueued = true;
+  const run = () => { if (!layoutQueued) return; layoutQueued = false; layoutApps(); };
+  requestAnimationFrame(run);
+  setTimeout(run, 50);
+}
+const slotWatch = new ResizeObserver(scheduleLayout);
+
+// ---- focus: one app, the whole screen ----------------------------------------
+// The widgets drop away (the dock hides) and the app takes everything below the
+// top bar. video: YouTube shows just its player (theater). Not saved: a focus
+// is for now, the layout underneath is untouched.
+function setFocus(name, opts) {
+  if (!APPS[name]) return false;
+  const video = !!(opts && opts.video);
+  if (focus && focus.video && focus.app !== name) sendTheater(focus.app, false);
+  focus = { app: name, video };
+  document.body.classList.add("focus");
+  document.body.classList.remove("no-main");
+  appFrame(name);
+  sendTheater(name, video);
+  $("#focus-exit").hidden = false;
+  layoutApps();
+  syncWebViews();
+  renderMini();
+  return true;
+}
+function clearFocus(quiet) {
+  if (!focus) return false;
+  if (focus.video) sendTheater(focus.app, false);
+  focus = null;
+  document.body.classList.remove("focus");
+  document.body.classList.toggle("no-main", !state.app);
+  $("#focus-exit").hidden = true;
+  if (!quiet) { layoutApps(); syncWebViews(); renderMini(); }
+  return true;
+}
+// Which web apps are showing just their video, full screen or in a panel.
+const theaterOn = new Set();
+function sendTheater(name, on) {
+  const f = document.getElementById("app-" + name);
+  if (!f || !WEB_APPS.test(name)) return;
+  if (on) theaterOn.add(name); else theaterOn.delete(name);
+  const send = () => { try { f.contentWindow.postMessage({ type: "y70:web-theater", on }, "*"); } catch (e) {} };
+  // A frame made just now has to load first.
+  if (f.dataset.loaded) send(); else f.addEventListener("load", () => { f.dataset.loaded = "1"; send(); }, { once: true });
+}
+
+// ---- docking apps into the panel plane ---------------------------------------
+function dockApp(name, opts) {
+  if (!APPS[name]) return false;
+  opts = opts || {};
+  const key = "app:" + name;
+  const w = state.widgets[key] || (state.widgets[key] = { on: false, h: null, collapsed: false });
+  w.on = true; w.collapsed = false;
+  if (focus && focus.app === name) clearFocus(true);
+  // The main area can't show what the dock shows: fall back to the app shown
+  // before it, or leave the main area to the dock.
+  if (state.app === name) {
+    const prev = state.prevApp && state.prevApp !== name && !isDocked(state.prevApp) ? state.prevApp : null;
+    state.app = prev;
+    document.body.classList.toggle("no-main", !prev);
+    if (prev) appFrame(prev);
+  }
+  if (opts.position != null) movePanel(key, opts.position, true);
+  // As asked, or 16:9 — either way no more than the dock has room for.
+  w.h = Math.max(MIN_H, Math.min(maxH(key), Math.max(MIN_H, dockRoom(key)), Math.round(opts.h || w.h || defaultH(key))));
+  appFrame(name);
+  save();
+  renderDock();
+  return true;
+}
+function undockApp(name) {
+  const w = state.widgets["app:" + name];
+  if (!w || !w.on) return false;
+  w.on = false;
+  if (theaterOn.has(name)) sendTheater(name, false);
+  save();
+  renderDock();
+  return true;
+}
+
+// position: "top", "bottom", an index, or { before: key } / { after: key }.
+function movePanel(key, position, quiet) {
+  const order = normalizeOrder(state.order).filter((k) => k !== key);
+  const onKeys = order.filter((k) => state.widgets[k] && state.widgets[k].on);
+  let at = order.length;
+  if (position === "top" || position === 0) at = onKeys.length ? order.indexOf(onKeys[0]) : 0;
+  else if (position === "bottom") at = onKeys.length ? order.indexOf(onKeys[onKeys.length - 1]) + 1 : order.length;
+  else if (typeof position === "number") {
+    // Index among the panels that are on screen.
+    const ref = onKeys[Math.max(0, Math.min(onKeys.length, position))];
+    at = ref ? order.indexOf(ref) : order.length;
+  } else if (position && (position.before || position.after)) {
+    const ref = position.before || position.after;
+    const i = order.indexOf(ref);
+    if (i >= 0) at = position.before ? i : i + 1;
+  }
+  order.splice(at, 0, key);
+  state.order = order;
+  if (!quiet) { save(); renderDock(); }
+  return true;
+}
+
+// Room the dock can give one panel without pushing anything off screen: the
+// screen, less the top bar, less a fifth for the main app when there is one,
+// less every other panel on screen.
+const MAIN_MIN = 0.2;
+function dockRoom(exceptKey) {
+  const top = $("#topbar").getBoundingClientRect().height;
+  let room = window.innerHeight - top - (state.app && !isDocked(state.app) ? Math.round(window.innerHeight * MAIN_MIN) : 0);
+  for (const k of normalizeOrder(state.order)) {
+    const w = state.widgets[k];
+    if (k === exceptKey || !w || !w.on || !panelDef(k)) continue;
+    room -= w.collapsed ? 30 : (w.h || defaultH(k));
+  }
+  return room;
+}
+// Returns the height it got: no more than fits.
+function resizePanel(key, h) {
+  const w = state.widgets[key];
+  if (!w) return null;
+  const fit = Math.max(MIN_H, dockRoom(key));
+  w.h = Math.max(MIN_H, Math.min(maxH(key), fit, Math.round(h)));
+  w.collapsed = false;
+  save();
+  renderDock();
+  return w.h;
+}
+
+// What is on screen, for Jarvis (and anyone else asking).
+function layoutSnapshot() {
+  const H = window.innerHeight, W = window.innerWidth;
+  const panels = [];
+  for (const key of normalizeOrder(state.order)) {
+    const w = state.widgets[key];
+    const def = panelDef(key);
     if (!def || !w || !w.on) continue;
+    const el = document.querySelector('#dock .panel[data-key="' + key + '"]');
+    panels.push({
+      key, kind: isAppKey(key) ? "app" : "widget", title: def.title,
+      height: el ? Math.round(el.getBoundingClientRect().height) : w.h || defaultH(key),
+      collapsed: !!w.collapsed,
+    });
+  }
+  const mainEl = $("#appframe").getBoundingClientRect();
+  return {
+    screen: { width: W, height: H },
+    focus: focus ? { app: focus.app, justVideo: focus.video } : null,
+    main: state.app && !focus ? { app: state.app, height: Math.round(mainEl.height) } : null,
+    panels,
+    scene: state.scene,
+    hiddenWidgets: Object.keys(WIDGETS).filter((k) => !(state.widgets[k] && state.widgets[k].on)),
+  };
+}
+// One line of it, for each request Jarvis hears.
+function describeScreen() {
+  if (focus) return (focus.video ? "Just a video, full screen, in " : "Full screen: ") + APPS[focus.app].title + " (widgets hidden).";
+  const s = layoutSnapshot();
+  const parts = [];
+  if (s.main) parts.push(APPS[s.main.app].title + " (main)");
+  if (s.panels.length) parts.push("panels top to bottom: " + s.panels.map((p) => p.title + (p.kind === "app" ? " app" : "") + (p.collapsed ? " (collapsed)" : "")).join(", "));
+  return parts.join("; ") + ".";
+}
 
-    const panel = document.createElement("div");
-    panel.className = "panel" + (w.collapsed ? " collapsed" : "");
-    panel.dataset.widget = name;
+// ---- widget dock -----------------------------------------------------------
+// Panels are made once and kept: a re-render only adds, removes, re-sizes and
+// re-orders them (with CSS order, since moving an element reloads its iframe),
+// so a resize or a collapse no longer reloads every widget.
+function makePanel(key) {
+  const def = panelDef(key);
+  const app = isAppKey(key) ? appOf(key) : null;
+  const panel = document.createElement("div");
+  panel.className = "panel" + (app ? " app-panel" : "");
+  panel.dataset.key = key;
+  if (app) panel.dataset.app = app; else panel.dataset.widget = key;
 
-    const bar = document.createElement("div");
-    bar.className = "panel-bar";
-    bar.innerHTML =
-      `<span class="grip"></span><span class="panel-title">${def.title}</span>` +
-      `<span class="panel-spacer"></span>` +
-      `<button class="panel-collapse">${w.collapsed ? "▲" : "▼"}</button>`;
+  const bar = document.createElement("div");
+  bar.className = "panel-bar";
+  bar.innerHTML =
+    `<span class="grip"></span><span class="panel-title"></span>` +
+    `<span class="panel-spacer"></span>` +
+    (app
+      ? `<button class="panel-btn" data-act="focus" title="Full screen">⤢</button>` +
+        `<button class="panel-btn" data-act="main" title="Back to the main area">⤒</button>` +
+        `<button class="panel-btn" data-act="close" title="Close the panel">✕</button>`
+      : "") +
+    `<button class="panel-collapse">▼</button>`;
+  bar.querySelector(".panel-title").textContent = def.title;
+  panel.appendChild(bar);
 
+  if (app) {
+    // The app's own frame is laid over this box (layoutApps).
+    const slot = document.createElement("div");
+    slot.className = "panel-slot";
+    panel.appendChild(slot);
+    slotWatch.observe(slot);
+  } else {
     const iframe = document.createElement("iframe");
     iframe.src = def.src;
     iframe.title = def.title;
-
-    panel.appendChild(bar);
     panel.appendChild(iframe);
-    panel.style.height = w.collapsed ? "auto" : (w.h || defaultH()) + "px";
-    dock.appendChild(panel);
-
-    wirePanelDrag(panel, bar, name);
-    bar.querySelector(".panel-collapse").addEventListener("pointerup", (e) => {
-      e.stopPropagation();
-      toggleCollapse(name);
-    });
   }
+
+  wirePanelDrag(panel, bar, key);
+  bar.querySelector(".panel-collapse").addEventListener("pointerup", (e) => {
+    e.stopPropagation();
+    toggleCollapse(key);
+  });
+  bar.querySelectorAll(".panel-btn").forEach((b) => {
+    b.addEventListener("pointerdown", (e) => e.stopPropagation());
+    b.addEventListener("pointerup", (e) => {
+      e.stopPropagation();
+      if (b.dataset.act === "focus") setFocus(app);
+      if (b.dataset.act === "main") setApp(app);
+      if (b.dataset.act === "close") undockApp(app);
+    });
+  });
+  return panel;
+}
+
+function renderDock() {
+  const dock = $("#dock");
+  const want = normalizeOrder(state.order).filter((k) => panelDef(k) && state.widgets[k] && state.widgets[k].on);
+  dock.querySelectorAll(".panel[data-key]").forEach((p) => {
+    if (want.includes(p.dataset.key)) return;
+    const slot = p.querySelector(".panel-slot");
+    if (slot) slotWatch.unobserve(slot);
+    p.remove();
+  });
+  want.forEach((key, i) => {
+    let panel = dock.querySelector('.panel[data-key="' + key + '"]');
+    if (!panel) { panel = makePanel(key); dock.appendChild(panel); }
+    const w = state.widgets[key];
+    panel.classList.toggle("collapsed", !!w.collapsed);
+    panel.querySelector(".panel-collapse").textContent = w.collapsed ? "▲" : "▼";
+    panel.style.height = w.collapsed ? "auto" : (w.h || defaultH(key)) + "px";
+    panel.style.order = String(i + 1);
+  });
   // Switching the widget off takes its iframe away mid-sentence; without this
   // a borrowed window would be left hanging over the panel.
   if (native && native.pinPlace && !pinFrame()) native.pinPlace({ visible: false });
   renderWidgetList();
+  scheduleLayout();
+  syncWebViews();
 }
 
 function toggleCollapse(name) {
@@ -203,7 +497,7 @@ function wirePanelDrag(panel, bar, name) {
     const dy = startY - e.clientY; // drag up = positive = taller
     if (Math.abs(dy) > 4) moved = true;
     const w = state.widgets[name];
-    let h = Math.max(0, Math.min(startH + dy, maxH()));
+    let h = Math.max(0, Math.min(startH + dy, maxH(name)));
     if (h > MIN_H && w.collapsed) {
       w.collapsed = false;
       panel.classList.remove("collapsed");
@@ -294,11 +588,12 @@ function renderWidgetList() {
   if (!box) return;
   box.innerHTML = "";
   for (const name of normalizeOrder(state.order)) {
-    const def = WIDGETS[name];
+    const def = panelDef(name);
     if (!def) continue;
+    const app = isAppKey(name) ? appOf(name) : null;
     const w = state.widgets[name] || (state.widgets[name] = { on: false, h: null, collapsed: false });
     const row = document.createElement("div");
-    row.className = "wrow" + (w.on ? " on" : "");
+    row.className = "wrow" + (w.on ? " on" : "") + (app ? " app-row" : "");
     row.dataset.widget = name;
     row.innerHTML =
       '<span class="wgrip" aria-label="Reorder"></span>' +
@@ -307,9 +602,11 @@ function renderWidgetList() {
       '<span class="wcheck"></span>';
     row.querySelector(".wgrip").textContent = "\u2630";
     row.querySelector(".tile-ico").textContent = def.glyph || "";
-    row.querySelector(".wname").textContent = def.title;
+    row.querySelector(".wname").textContent = def.title + (app ? " \u00b7 app panel" : "");
     row.addEventListener("pointerup", (e) => {
       if (justDragged || e.target.closest(".wgrip")) return;
+      // An app goes through dockApp, which also sorts out the main area.
+      if (app) { if (w.on) undockApp(app); else dockApp(app); return; }
       w.on = !w.on;
       save();
       renderDock();
@@ -371,18 +668,21 @@ function sceneLayout(id) {
   if (!base) return null;
   const edit = state.sceneEdits && state.sceneEdits[id];
   // A packed scene's order is simply the order its widgets are written in.
+  // A saved scene may have no main app at all (null): everything in panels.
   return edit
-    ? { app: edit.app || base.app, widgets: edit.widgets || base.widgets, order: edit.order }
+    ? { app: edit.app !== undefined ? edit.app : base.app, widgets: edit.widgets || base.widgets, order: edit.order }
     : { app: base.app, widgets: base.widgets, order: Object.keys(base.widgets) };
 }
 
 function applyScene(id) {
   const layout = sceneLayout(id);
   if (!layout) return;
-  for (const name of Object.keys(WIDGETS)) {
+  clearFocus(true);
+  // Widgets and docked apps alike.
+  for (const name of panelKeys()) {
     const want = layout.widgets[name];
     const w = state.widgets[name] || (state.widgets[name] = { on: false, h: null, collapsed: false });
-    w.on = !!want;
+    w.on = !!want && !(isAppKey(name) && appOf(name) === layout.app);
     if (want) {
       if (want.h) w.h = want.h;
       w.collapsed = !!want.collapsed;
@@ -391,7 +691,7 @@ function applyScene(id) {
   if (layout.order) state.order = normalizeOrder(layout.order);
   state.scene = id;
   save();
-  setApp(layout.app || state.app);
+  setApp(layout.app);
   renderDock();
   renderScenes();
 }
@@ -930,6 +1230,14 @@ async function handleWebMessage(source, d) {
       width: d.rect.width,
       height: d.rect.height,
     };
+    // In a dock that has scrolled, only the part the dock shows: a native view
+    // sits above all HTML and would otherwise spill over the bar or the app.
+    const vt = Number(frame.dataset.visTop), vb = Number(frame.dataset.visBottom);
+    if (Number.isFinite(vt) && Number.isFinite(vb)) {
+      const y0 = Math.max(rect.y, vt), y1 = Math.min(rect.y + rect.height, vb);
+      if (y1 - y0 < 24) return reply(await native.webPlace(d.site, { visible: false }));
+      rect.y = y0; rect.height = y1 - y0;
+    }
     return reply(await native.webPlace(d.site, {
       visible: true, rect, url: d.url, mobile: d.mobile,
     }));
@@ -978,13 +1286,17 @@ function isCovered() {
 }
 
 // Switching apps or opening the drawer must take the native view down with it,
-// otherwise it hangs over whatever is now on top.
+// otherwise it hangs over whatever is now on top. Several web apps can be on
+// screen at once now (main + panels), so each is hidden on its own.
 function syncWebViews() {
   if (!native) return;
-  const covered = isCovered();
-  const activeIsWeb = /^(youtube|shorts|tiktok|snapchat|web)$/.test(state.app);
-  if (covered || !activeIsWeb) native.webHideAll();
-  // When it should be visible the app page re-places it on its own next tick.
+  if (isCovered()) { native.webHideAll(); return; }
+  const shown = appSlots();
+  for (const name of Object.keys(APPS)) {
+    if (!WEB_APPS.test(name) || shown.has(name)) continue;
+    if (document.getElementById("app-" + name)) native.webPlace(name, { visible: false });
+  }
+  // The ones that should be visible re-place themselves (layoutApps nudges them).
 }
 
 // ---- Mini player -----------------------------------------------------------
@@ -1066,6 +1378,15 @@ wireSettings();
 wireScenes();
 wireNative();
 wirePhone();
+// Leaving full screen: a chip in the top bar, the one strip a native view can
+// never cover.
+(() => {
+  const x = $("#focus-exit");
+  x.addEventListener("pointerdown", (e) => e.stopPropagation());
+  x.addEventListener("pointerup", (e) => { e.stopPropagation(); clearFocus(); });
+})();
+slotWatch.observe($("#appframe"));
+$("#dock").addEventListener("scroll", scheduleLayout, { passive: true });
 setApp(state.app);
 renderDock();
-window.addEventListener("resize", () => renderDock());
+window.addEventListener("resize", () => { renderDock(); scheduleLayout(); });

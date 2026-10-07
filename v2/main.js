@@ -451,10 +451,73 @@ function webAction(site, action, arg) {
       case "zoom":
         wc.setZoomFactor(Math.max(0.4, Math.min(1.5, Number(arg) || 1)));
         break;
+      case "theater": setTheater(view, !!arg); break;
+      case "media": {
+        // The page's own <video>: play, pause, toggle, mute, unmute.
+        const what = JSON.stringify(String(arg || "toggle"));
+        wc.executeJavaScript("(" + MEDIA_JS + ")(" + what + ")").catch(() => {});
+        break;
+      }
       default: return { ok: false, error: "unknown action" };
     }
   } catch (e) { return { ok: false, error: e.message }; }
   return { ok: true };
+}
+
+// ---- Theater: just the video ------------------------------------------------
+// Mobile YouTube's player, pinned over the whole view with the page hidden
+// behind it, the picture letterboxed (contain) on black. Measured in an
+// offscreen window with the panel's phone user agent: the <video> goes from
+// 667x375 under the header to the full 682x1100 view.
+// removeInsertedCSS does not undo a stylesheet in this Electron (measured, both
+// origins: the player stayed 1100 tall), so the rules only apply while <html>
+// carries data-y70-theater, and on/off flips that attribute. insertCSS lasts
+// for one document: it goes back in after each full load.
+const TH = "html[data-y70-theater] ";
+const THEATER_CSS = `
+${TH}, ${TH}body { background: #000 !important; overflow: hidden !important; }
+${TH}#player-container-id, ${TH}.player-container, ${TH}#player, ${TH}#movie_player, ${TH}.html5-video-player {
+  position: fixed !important; inset: 0 !important; top: 0 !important; left: 0 !important;
+  width: 100vw !important; height: 100vh !important; max-height: none !important;
+  margin: 0 !important; padding: 0 !important; transform: none !important;
+  z-index: 2147483000 !important; background: #000 !important;
+}
+${TH}.html5-video-container { position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; }
+${TH}video.html5-main-video, ${TH}#movie_player video {
+  position: absolute !important; left: 0 !important; top: 0 !important;
+  width: 100% !important; height: 100% !important; object-fit: contain !important;
+}`;
+// Mobile YouTube starts an autoplayed video muted; a video asked for out loud
+// should be heard.
+const MEDIA_JS = `function (what) {
+  const v = document.querySelector("video");
+  const p = document.getElementById("movie_player");
+  if (!v) return false;
+  if (what === "unmute" || what === "play") { try { p && p.unMute && p.unMute(); } catch (e) {} v.muted = false; }
+  if (what === "mute") v.muted = true;
+  if (what === "play" || (what === "toggle" && v.paused)) v.play().catch(() => {});
+  else if (what === "pause" || what === "toggle") v.pause();
+  return true;
+}`;
+function setTheater(view, on) {
+  const wc = view.webContents;
+  view.__theater = on;
+  const sync = () => {
+    if (view.__theater && !view.__theaterCss) {
+      view.__theaterCss = true;
+      wc.insertCSS(THEATER_CSS, { cssOrigin: "user" }).catch(() => { view.__theaterCss = false; });
+    }
+    // Off: the player sized itself to the theater; let it measure the page again.
+    wc.executeJavaScript("document.documentElement.toggleAttribute('data-y70-theater', " + !!view.__theater + ");" +
+      (view.__theater ? "(" + MEDIA_JS + ")('play');" : "setTimeout(() => window.dispatchEvent(new Event('resize')), 50);")).catch(() => {});
+  };
+  if (!view.__theaterHooked) {
+    view.__theaterHooked = true;
+    // A full page load drops inserted CSS (and the attribute with it).
+    wc.on("did-start-navigation", (_e, _url, inPage, isMain) => { if (isMain && !inPage) view.__theaterCss = false; });
+    wc.on("dom-ready", () => { if (view.__theater) sync(); });
+  }
+  sync();
 }
 
 function webState(site) {

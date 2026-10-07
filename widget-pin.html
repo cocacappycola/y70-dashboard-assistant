@@ -178,6 +178,28 @@
       paint();
     }
 
+    // Jarvis: "pin Discord to the panel". Finds the window by title or program,
+    // holds it the same way a tap does, and says what happened.
+    addEventListener("message", async (e) => {
+      const d = e.data;
+      if (!d || (d.type !== "y70:pin-use" && d.type !== "y70:pin-release")) return;
+      const answer = (r) => { try { window.parent.postMessage({ type: "y70:pin-done", id: d.id, ...r }, "*"); } catch (err) {} };
+      if (d.type === "y70:pin-release") {
+        await ask("clear", {});
+        pinned = null; lastSig = ""; paint(); refresh();
+        return answer({ ok: true });
+      }
+      const list = await ask("list", {});
+      if (!Array.isArray(list)) return answer({ ok: false, error: "Pinning needs the installed app." });
+      const q = String(d.match || "").toLowerCase().trim();
+      const w = list.find((x) => (x.process || "").toLowerCase() === q) ||
+        list.find((x) => (x.title || "").toLowerCase().includes(q) || (x.process || "").toLowerCase().includes(q));
+      if (!w) return answer({ ok: false, error: "No window like \"" + d.match + "\". Open: " + list.map((x) => x.process + " (" + shorten(x.title) + ")").slice(0, 12).join(", ") });
+      const st = await ask("set", { hwnd: w.hwnd, title: w.title, process: w.process });
+      if (st && st.hwnd) { pinned = st; lastSig = ""; paint(); place(true); return answer({ ok: true, title: w.title, process: w.process }); }
+      answer({ ok: false, error: (st && st.error) || "Could not hold that window." });
+    });
+
     (async () => {
       const st = await ask("state", {});
       // A null here means nothing answered at all — no shell to relay to.

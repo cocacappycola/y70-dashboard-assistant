@@ -26,8 +26,13 @@ answers out loud, puts anything worth seeing on the panel, and can do things:
 | "How's my PC doing?" / "how much have I spent on Claude today?" / "what's my phone battery?" | Reads the dashboard's own data: CPU, GPU, temperatures, network, busiest programs; Claude usage; the iPhone's battery, notifications and calls |
 | "Answer it" / "decline the call" | The iPhone, over the panel's Bluetooth bridge |
 | "Any updates?" / "install it" / "switch to the main fork" | The app itself: checks for and installs updates (restarting after he's said so), switches forks |
-| "Open YouTube" / "gaming layout" / "show the PC widget" / "Ember theme" / "open your settings" | Drives the panel: apps, scenes, widgets, themes, its settings and start-up options |
-| "Remember that…" / "add milk to my notes" | Shared memory / the Notes widget |
+| "Show me a video of black holes forming" / "pause it" / "exit" | Finds it on YouTube and plays just the video, full screen, widgets hidden (or in a panel, or the YouTube page) |
+| "Zoom into the weather app" / "go home" / "save this as my home layout" | Full-screen focus and back; the Home layout, yours to redefine |
+| "Put YouTube in a panel under Spotify" / "make the PC stats bigger and put it at the top" | Apps and widgets share one column of resizable panels; Jarvis knows what is on screen and where |
+| "Write me a packing list" / "add bug spray under Gear" / "tick off the tent" | The Notes widget, formatted (headings, bullets, checklists), opened and highlighted where it changed |
+| "Put 1847 times 23 on the calculator" / "pin Discord to the panel" | Drives the widgets themselves |
+| "Ember theme" / "open your settings" | Themes, its settings and start-up options |
+| "Remember that…" | Shared memory |
 | "Lights purple" / "lights off" / "dim the lights to 30" | Your Govee strip: over the LAN when it has LAN control, Govee's cloud when it is Wi-Fi only |
 | "Download Qwen 3.5 27B" / "find me a coding model" | Finds GGUF builds on Hugging Face, opens the page, downloads after you tap |
 
@@ -121,6 +126,28 @@ box to type into instead.
    wrapper around the same LAN packets and refuses lights that aren't on LAN, so
    Jarvis doesn't use it. Names come from Govee Desktop's device list; a light's
    address from a LAN scan or its MAC in the ARP table.
+
+### The screen: one plane for apps and widgets
+
+The dock holds panels, and a panel is a widget or an app ("app:youtube") —
+same bar, same drag-to-resize, same order in the drawer's list, same scenes.
+App frames never move in the DOM (moving an iframe reloads it, which would
+stop Spotify): they all live in `#app-layer` and are laid over whichever slot
+shows them — the main area, a dock panel, or the whole screen in **focus**,
+where the dock hides and an *Exit* chip appears in the top bar. Web apps'
+native views follow their frame. Panels Jarvis opens or resizes get no more
+than the room left (the main app keeps a fifth of the screen); if the dock
+still overflows it scrolls, and frames over it are clipped to what it shows.
+**Home** is a scene like the others, packed as the first-run layout and
+saved over by "save this as home". Every request tells Jarvis what is on
+screen ("Spotify (main); panels top to bottom: YouTube app, PC stats").
+
+**Just the video** (theater): the YouTube view gets a stylesheet that pins
+mobile YouTube's player over the whole view, letterboxed on black, unmuted.
+Electron's `removeInsertedCSS` does not undo a stylesheet here (measured), so
+the rules only apply while `<html data-y70-theater>` is set and on/off flips
+the attribute; the CSS goes back in after every full page load. YouTube
+search is key-less: the results page's `ytInitialData`.
 
 ### How it works
 

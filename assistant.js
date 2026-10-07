@@ -995,15 +995,47 @@ const TOOLS = [
   },
   {
     name: "panel", where: "client", core: true,
-    description: "This dashboard app itself. status (version, update, fork, what is open). check_updates; install_update restarts the app into a downloaded update (only when the user asks). switch_fork (fork: main or jarvis) downloads the other line of the app; install_update then switches. open an app (spotify, weather, youtube, shorts, tiktok, snapchat, web). widget (name, on: true/false) shows or hides a widget (claude, weather, pc, calc, media, lyrics, audio, timer, notes, discord, face, pin). scene (name: working, gaming, music, idle). theme (name). settings opens a page (jarvis, appearance, drawer, close). reload. keyboard, never_take_focus, start_with_windows, taskbar_icon take on: true/false.",
+    description: "This dashboard app itself (for what is on screen, use layout). status (version, update, fork). check_updates; install_update restarts the app into a downloaded update (only when the user asks). switch_fork (fork: main or jarvis) downloads the other line of the app; install_update then switches. theme (name). settings opens a page (jarvis, appearance, drawer, close). reload. keyboard, never_take_focus, start_with_windows, taskbar_icon take on: true/false.",
     input_schema: {
       type: "object",
       properties: {
         action: {
           type: "string",
-          enum: ["status", "check_updates", "install_update", "switch_fork", "cancel_fork_switch", "open", "widget", "scene", "theme", "settings", "reload", "keyboard", "never_take_focus", "start_with_windows", "taskbar_icon"],
+          enum: ["status", "check_updates", "install_update", "switch_fork", "cancel_fork_switch", "theme", "settings", "reload", "keyboard", "never_take_focus", "start_with_windows", "taskbar_icon"],
         },
-        name: { type: "string" }, app: { type: "string" }, fork: { type: "string" }, on: { type: "boolean" },
+        name: { type: "string" }, fork: { type: "string" }, on: { type: "boolean" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "layout", where: "client", core: true,
+    description: "The panel's screen: what is where, and changing it. Apps (spotify, weather, youtube, shorts, tiktok, snapchat, web) and widgets (claude, weather, pc, calc, media, lyrics, audio, timer, notes, discord, face, pin) share one column of resizable panels under the main app. status: the main app, every panel top to bottom with its height, and what each is for. open (app): the main area. focus (app): that app gets the whole screen, widgets hidden; exit_focus brings them back. home: the Home layout; save_home saves what is on screen as Home. widget (name, on). dock (app, height, position): an app in a panel among the widgets; undock (app). resize (name, height in px, or size small/medium/large/half). move (name, position top/bottom/number, or before/after a panel's name). collapse / expand (name). scene (name: home, working, gaming, music, idle); save_scene (name). calculator (expression): put a sum on the calculator widget and solve it. pin (window: part of its title or program) holds another program's window in the pin widget; unpin.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["status", "open", "focus", "exit_focus", "home", "save_home", "widget", "dock", "undock", "resize", "move", "collapse", "expand", "scene", "save_scene", "calculator", "pin", "unpin"],
+        },
+        app: { type: "string" }, name: { type: "string" }, on: { type: "boolean" },
+        height: { type: "integer" }, size: { type: "string", enum: ["small", "medium", "large", "half"] },
+        position: { type: "string", description: "top, bottom, or a number counting from 0 at the top" },
+        before: { type: "string" }, after: { type: "string" },
+        expression: { type: "string" }, window: { type: "string" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "youtube", where: "client", core: true,
+    description: "YouTube on the panel. play (query, or a url) finds the video and plays it. view: full (the default: just the video, the whole screen, widgets hidden), app (the YouTube page, whole screen), panel (just the video, in a panel among the widgets), normal (the YouTube page in the main area, widgets stay). search (query) shows YouTube's results to browse. pause, resume. exit leaves full screen.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["play", "search", "pause", "resume", "exit"] },
+        query: { type: "string" }, url: { type: "string" },
+        view: { type: "string", enum: ["full", "app", "panel", "normal"] },
       },
       required: ["action"],
     },
@@ -1021,9 +1053,16 @@ const TOOLS = [
     },
   },
   {
-    name: "notes", where: "server", core: false,
-    description: "The Notes widget: read it, or append a line to it.",
-    input_schema: { type: "object", properties: { action: { type: "string", enum: ["read", "append"] }, text: { type: "string" } }, required: ["action"] },
+    name: "notes", where: "server", core: true,
+    description: "The Notes widget; every change opens it on screen and highlights what changed. The notes are text with light formatting: # heading, ## subheading, - bullet, - [ ] checkbox, - [x] ticked, 1. numbered, **bold**, --- line. read returns them with line numbers. write (text) replaces everything. append (text) adds at the end, or at the end of the section named in section (made if missing). insert (text) after the line containing after, or at line. replace (find, text) swaps a passage or line. delete (find, or line) removes the lines. check / uncheck (find) ticks a checklist item. clear empties them.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["read", "write", "append", "insert", "replace", "delete", "check", "uncheck", "clear"] },
+        text: { type: "string" }, find: { type: "string" }, after: { type: "string" }, section: { type: "string" }, line: { type: "integer" },
+      },
+      required: ["action"],
+    },
   },
   {
     name: "phone", where: "server", core: true,
@@ -1071,6 +1110,127 @@ function bestMatch(list, q, nameOf) {
   const words = n.split(/\s+/).filter((w) => w.length > 1 && !/^(the|my|a|to)$/.test(w));
   return list.find((x) => nm(x) === n) || list.find((x) => nm(x).startsWith(n)) || list.find((x) => nm(x).includes(n))
     || (words.length ? list.find((x) => words.every((w) => nm(x).includes(w))) : null) || null;
+}
+
+// ---- notes: the Notes widget's text, edited line by line ---------------------------
+// Edits find lines by what they say (forgiving of the markdown around it),
+// because a model is far better at quoting a line than counting to it.
+const plainLine = (l) => l.replace(/^\s*(?:#{1,6}\s+|[-*•]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+|>\s?)/, "").replace(/\*\*|__|~~|`/g, "").trim().toLowerCase();
+function findLine(lines, q, from) {
+  const n = String(q || "").trim().toLowerCase();
+  if (!n) return -1;
+  const bare = plainLine(n);
+  for (let i = from || 0; i < lines.length; i++) if (lines[i].toLowerCase().trim() === n || plainLine(lines[i]) === bare) return i;
+  for (let i = from || 0; i < lines.length; i++) if (lines[i].toLowerCase().includes(n) || (bare && plainLine(lines[i]).includes(bare))) return i;
+  return -1;
+}
+const headingLevel = (l) => { const m = l.match(/^\s*(#{1,6})\s/); return m ? m[1].length : 0; };
+function numbered(text) {
+  const lines = String(text || "").replace(/\s+$/, "").split("\n");
+  if (lines.length === 1 && !lines[0]) return "";
+  const shown = lines.length > 120 ? lines.slice(-120) : lines;
+  const off = lines.length - shown.length;
+  return (off ? "(first " + off + " lines not shown)\n" : "") + shown.map((l, i) => (i + off + 1) + ": " + l).join("\n");
+}
+function editNotes(text, a) {
+  const lines = text.replace(/\s+$/, "").split("\n");
+  if (lines.length === 1 && !lines[0]) lines.length = 0;
+  const add = String(a.text || "").replace(/\r/g, "").replace(/^\s*\n/, "").replace(/\s+$/, "");
+  const addLines = add ? add.split("\n") : [];
+  const join = (ls) => (ls.length ? ls.join("\n") + "\n" : "");
+  const range = (start, n) => Array.from({ length: n }, (_, i) => start + i);
+  switch (a.action) {
+    case "read": return { msg: "" };
+    case "write":
+      if (!add) return { error: "write needs text (to empty the notes, use clear)" };
+      return { text: join(addLines), changed: range(0, addLines.length), msg: "Wrote the notes (" + addLines.length + " lines)." };
+    case "clear": return { text: "", changed: [], msg: "Cleared the notes." };
+    case "append": {
+      if (!add) return { error: "append needs text" };
+      if (a.section) {
+        let h = -1;
+        for (let i = 0; i < lines.length; i++) if (headingLevel(lines[i]) && plainLine(lines[i]).includes(String(a.section).toLowerCase().trim())) { h = i; break; }
+        if (h < 0) {
+          // A new section at the end.
+          const lead = lines.length && lines[lines.length - 1].trim() ? [""] : [];
+          const start = lines.length + lead.length;
+          const out = lines.concat(lead, ["## " + String(a.section).trim()], addLines);
+          return { text: join(out), changed: range(start, addLines.length + 1), msg: "Added a new section, " + String(a.section).trim() + "." };
+        }
+        // The section runs to the next heading of the same or a higher level.
+        const lvl = headingLevel(lines[h]);
+        let end = lines.length;
+        for (let i = h + 1; i < lines.length; i++) if (headingLevel(lines[i]) && headingLevel(lines[i]) <= lvl) { end = i; break; }
+        let at = end;
+        while (at > h + 1 && !lines[at - 1].trim()) at--;     // before the blank lines that close it
+        lines.splice(at, 0, ...addLines);
+        return { text: join(lines), changed: range(at, addLines.length), msg: "Added " + addLines.length + " line(s) under " + lines[h].replace(/^#+\s*/, "") + "." };
+      }
+      const start = lines.length;
+      // Say where it really landed, so nobody has to guess.
+      let under = "";
+      for (let i = lines.length - 1; i >= 0; i--) if (headingLevel(lines[i])) { under = lines[i].replace(/^\s*#+\s*/, ""); break; }
+      return { text: join(lines.concat(addLines)), changed: range(start, addLines.length), msg: "Added " + addLines.length + " line(s) at the very end" + (under ? ", which is under the heading \"" + under + "\"" : "") + ". (To put it under another heading, append with section.)" };
+    }
+    case "insert": {
+      if (!add) return { error: "insert needs text" };
+      let at;
+      if (a.line != null) at = Math.max(0, Math.min(lines.length, Number(a.line) - 1));
+      else {
+        const i = findLine(lines, a.after);
+        if (i < 0) return { error: "No line like \"" + (a.after || "") + "\" in the notes. Read them first." };
+        at = i + 1;
+      }
+      lines.splice(at, 0, ...addLines);
+      return { text: join(lines), changed: range(at, addLines.length), msg: "Inserted " + addLines.length + " line(s) at line " + (at + 1) + "." };
+    }
+    case "replace": {
+      const find = String(a.find || "");
+      if (!find.trim()) return { error: "replace needs find (the text to change)" };
+      // A passage across lines: replace it as text.
+      const whole = join(lines);
+      const hit = whole.indexOf(find) >= 0 ? whole.indexOf(find) : whole.toLowerCase().indexOf(find.toLowerCase());
+      if (find.includes("\n")) {
+        if (hit < 0) return { error: "That passage isn't in the notes. Read them first." };
+        const before = whole.slice(0, hit), after = whole.slice(hit + find.length);
+        const out = before + add + after;
+        const first = before.split("\n").length - 1;
+        return { text: out.replace(/\s+$/, "") + "\n", changed: range(first, Math.max(1, addLines.length)), msg: "Replaced it." };
+      }
+      const i = findLine(lines, find);
+      if (i < 0) return { error: "No line like \"" + find + "\" in the notes. Read them first." };
+      // Inside a line, swap just the words; otherwise the whole line.
+      const pos = lines[i].toLowerCase().indexOf(find.toLowerCase());
+      if (pos >= 0 && find.trim().length < lines[i].trim().length && !add.includes("\n")) {
+        lines[i] = lines[i].slice(0, pos) + add + lines[i].slice(pos + find.length);
+        return { text: join(lines), changed: [i], msg: "Changed line " + (i + 1) + "." };
+      }
+      lines.splice(i, 1, ...addLines);
+      return { text: join(lines), changed: range(i, addLines.length), msg: "Replaced line " + (i + 1) + "." };
+    }
+    case "delete": {
+      if (a.line != null) {
+        const i = Number(a.line) - 1;
+        if (!(i >= 0 && i < lines.length)) return { error: "There is no line " + a.line + "." };
+        const gone = lines.splice(i, 1);
+        return { text: join(lines), changed: [], msg: "Deleted line " + (i + 1) + ": " + gone[0] };
+      }
+      const find = String(a.find || "");
+      if (!find.trim()) return { error: "delete needs find or line" };
+      const gone = [];
+      for (let i = lines.length - 1; i >= 0; i--) if (lines[i].toLowerCase().includes(find.toLowerCase()) || plainLine(lines[i]) === plainLine(find)) gone.unshift(lines.splice(i, 1)[0]);
+      if (!gone.length) return { error: "No line like \"" + find + "\" in the notes." };
+      return { text: join(lines), changed: [], msg: "Deleted " + gone.length + " line(s): " + gone.join(" | ") };
+    }
+    case "check":
+    case "uncheck": {
+      const i = findLine(lines.map((l) => (/\[[ xX]\]/.test(l) ? l : "")), a.find);
+      if (i < 0) return { error: "No checklist item like \"" + (a.find || "") + "\"." };
+      lines[i] = lines[i].replace(/\[[ xX]\]/, a.action === "check" ? "[x]" : "[ ]");
+      return { text: join(lines), changed: [i], msg: (a.action === "check" ? "Ticked: " : "Unticked: ") + plainLine(lines[i]) };
+    }
+    default: return { error: "unknown notes action " + a.action };
+  }
 }
 
 // ---- info: what the dashboard knows, section by section ----------------------
@@ -1372,15 +1532,16 @@ async function runServerTool(name, input, emit) {
       const file = H.stateFile("notes.txt");
       let text = "";
       try { text = fs.readFileSync(file, "utf8"); } catch (e) {}
-      if (a.action === "append") {
-        const add = String(a.text || "").trim();
-        if (!add) return ["nothing to add", true];
-        text = text.replace(/\s*$/, "") + (text.trim() ? "\n" : "") + add + "\n";
-        fs.writeFileSync(file, text, "utf8");
-        emit({ type: "notes" });
-        return ["added"];
+      const r = editNotes(text, a);
+      if (r.error) return [r.error, true];
+      if (r.text !== undefined && r.text !== text) {
+        fs.writeFileSync(file, r.text, "utf8");
+        text = r.text;
       }
-      return [text.trim() ? text.slice(-6000) : "(the notes are empty)"];
+      // The panel opens the Notes widget and lights up what changed.
+      emit({ type: "notes", flash: r.changed || [] });
+      if (a.action === "read") return [numbered(text) || "(the notes are empty)"];
+      return [r.msg + "\nThe notes now:\n" + (numbered(text) || "(empty)")];
     }
     case "info": {
       const r = await info(String(a.about || "everything"));
@@ -1425,7 +1586,9 @@ function who() { return settings.name || "the user"; }
 // from the tools this model actually has — then shows it done.
 const TOOL_GUIDE = {
   info: "anything about the PC (CPU, GPU, temperatures, memory, network, what is running, uptime), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
-  panel: "this app: check for or install updates, switch forks, open an app (Spotify, YouTube, Web...), show or hide a widget, a layout (gaming, music...), a theme, your own settings, reload",
+  panel: "this app itself: check for or install updates, switch forks, a theme, your own settings, reload",
+  layout: "what is on the screen and where: open an app, full screen (focus) and back, the Home layout (and saving a new one), show or hide widgets, put an app in a panel beside the widgets, resize, move, collapse, scenes, a sum on the calculator, pinning a window. The bracketed line says what is on screen now",
+  youtube: "\"show me a video of...\", \"put on some...\" to watch: plays it, just the video, full screen unless asked otherwise; pause, resume, exit",
   web_search: "news, scores, prices, release dates, facts, anything current or anything you are not certain of",
   read_page: "summarise or read an article or a link (from search results or one the user gave)",
   image_search: "\"show me\", \"what does it look like\"",
@@ -1443,7 +1606,7 @@ const TOOL_GUIDE = {
   lights: "the lights: on, off, colours, brightness, warm or cool white, scenes",
   discord: "mute, unmute, deafen, join or leave a voice channel, Discord's volumes, someone's volume",
   phone: "answer, decline or hang up a call; dismiss notifications",
-  notes: "the Notes widget: read it or add a line",
+  notes: "the Notes widget: write, add to, edit and tick off notes and lists, formatted (# headings, - bullets, - [ ] checkboxes, **bold**). Read first when editing; to add to a list with sections, append with section set to the right heading",
 };
 
 const TOOL_EXAMPLES = [
@@ -1456,6 +1619,11 @@ const TOOL_EXAMPLES = [
   ["pasta timer, 12 minutes", "timer {action: set, seconds: 720, label: pasta}", ""],
   ["how much have I spent on Claude today?", "info {about: claude_usage}", ""],
   ["what's my phone at?", "info {about: phone}", "then the battery level it returned"],
+  ["show me a video of the Webb telescope", "youtube {action: play, query: James Webb telescope}", "then one line about what is playing"],
+  ["make YouTube bigger and put the PC stats under it", "layout {action: resize, name: youtube, size: large} and layout {action: move, name: pc, after: youtube}", ""],
+  ["go home", "layout {action: home}", ""],
+  ["write me a packing list for the weekend", "notes {action: write, text: \"# Weekend packing\\n- [ ] ...\"}", "then say it's in the notes"],
+  ["tick off the eggs", "notes {action: check, find: eggs}", ""],
 ];
 
 function systemPrompt(small) {
@@ -1515,6 +1683,7 @@ function contextLine(ctx) {
   if (ctx && ctx.playing) bits.push("Playing: " + ctx.playing + ".");
   if (game.on) bits.push("A game is in front (" + (game.exe || "fullscreen") + ").");
   if (ctx && ctx.timers) bits.push("Timers: " + ctx.timers + ".");
+  if (ctx && ctx.screen) bits.push("On screen: " + String(ctx.screen).slice(0, 300));
   return "[" + bits.join(" ") + "]";
 }
 
@@ -2008,6 +2177,11 @@ async function handle(req, res, urlPath) {
   if (sub === "models" && req.method === "GET") {
     await localProbe(false);
     return json(res, 200, { ok: true, models: localModels(), needsRestart: local.needsRestart, downloads: models.list(), dir: models.modelsDir(settings) });
+  }
+  // ---- YouTube search, for the panel's youtube tool ----
+  if (sub === "youtube" && req.method === "GET") {
+    const q = new URL(req.url, "http://x").searchParams.get("q") || "";
+    return json(res, 200, await web.youtubeSearch(q, 6));
   }
   // ---- Govee lights ----
   if (sub === "lights") {
