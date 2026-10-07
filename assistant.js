@@ -896,23 +896,29 @@ const TOOLS = [
   },
   {
     name: "timer", where: "client", core: true,
-    description: "Countdown timers, shown in the top bar. set needs seconds and takes an optional label; cancel takes a label, or cancels all without one; list returns them.",
+    description: "Countdown timers, shown in the top bar. set needs seconds and takes an optional label; cancel takes a label, or cancels all without one; list returns them. Anything to do \"in N minutes\": give actions (tool calls run when it ends, e.g. [{tool: lights, input: {action: off}}]) and/or prompt (a request you will carry out then, out loud); ring false for no bell.",
     input_schema: {
       type: "object",
-      properties: { action: { type: "string", enum: ["set", "cancel", "list"] }, seconds: { type: "integer" }, label: { type: "string" } },
+      properties: {
+        action: { type: "string", enum: ["set", "cancel", "list"] }, seconds: { type: "integer" }, label: { type: "string" },
+        actions: { type: "array", items: { type: "object", properties: { tool: { type: "string" }, input: { type: "object" } } } },
+        prompt: { type: "string" }, ring: { type: "boolean" },
+      },
       required: ["action"],
     },
   },
   {
     name: "alarm", where: "client", core: true,
-    description: "Alarms. set needs time as 24-hour HH:MM and takes an optional label and days (\"weekdays\", \"weekends\", \"daily\" or day names like \"mon\"); with no days it rings once, at the next occurrence. cancel by time or label, or all; list returns them.",
+    description: "Alarms and anything scheduled for a time of day. set needs time as 24-hour HH:MM and takes an optional label and days (\"weekdays\", \"weekends\", \"daily\" or day names like \"mon\"); with no days it happens once, at the next occurrence. actions: tool calls run at that time (any tool, e.g. [{tool: lights, input: {action: brightness, level: 20}}]); prompt: a request you will carry out then, out loud (\"good morning briefing: weather and my notes\") — use actions for plain tool calls (lights, layout, music) and prompt only when something should be found out or said; ring false = no bell, just the work. attach (time or label, actions/prompt) adds work to an existing alarm. cancel by time or label, or all; list returns them.",
     input_schema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["set", "cancel", "list"] },
+        action: { type: "string", enum: ["set", "attach", "cancel", "list"] },
         time: { type: "string", description: "HH:MM, 24-hour" },
         label: { type: "string" },
         days: { type: "array", items: { type: "string" } },
+        actions: { type: "array", items: { type: "object", properties: { tool: { type: "string" }, input: { type: "object" } } } },
+        prompt: { type: "string" }, ring: { type: "boolean" },
       },
       required: ["action"],
     },
@@ -995,13 +1001,13 @@ const TOOLS = [
   },
   {
     name: "panel", where: "client", core: true,
-    description: "This dashboard app itself (for what is on screen, use layout). status (version, update, fork). check_updates; install_update restarts the app into a downloaded update (only when the user asks). switch_fork (fork: main or jarvis) downloads the other line of the app; install_update then switches. theme (name). settings opens a page (jarvis, appearance, drawer, close). reload. keyboard, never_take_focus, start_with_windows, taskbar_icon take on: true/false.",
+    description: "This dashboard app itself, and the PC's screen (for what is on the panel, use layout). status (version, update, fork). check_updates; install_update restarts the app into a downloaded update (only when the user asks). switch_fork (fork: main or jarvis) downloads the other line of the app; install_update then switches. screensaver starts the PC's screensaver (Wallpaper Engine's) on both screens once you have spoken; saying Jarvis brings the panel back over it while the main monitor stays in screensaver. screensaver_off ends it. wallpaper (name: next, pause, play, stop, mute, unmute, hide_icons, show_icons, or \"profile NAME\") controls Wallpaper Engine. theme (name). settings opens a page (jarvis, appearance, drawer, close). reload. keyboard, never_take_focus, start_with_windows, taskbar_icon take on: true/false.",
     input_schema: {
       type: "object",
       properties: {
         action: {
           type: "string",
-          enum: ["status", "check_updates", "install_update", "switch_fork", "cancel_fork_switch", "theme", "settings", "reload", "keyboard", "never_take_focus", "start_with_windows", "taskbar_icon"],
+          enum: ["status", "check_updates", "install_update", "switch_fork", "cancel_fork_switch", "screensaver", "screensaver_off", "wallpaper", "theme", "settings", "reload", "keyboard", "never_take_focus", "start_with_windows", "taskbar_icon"],
         },
         name: { type: "string" }, fork: { type: "string" }, on: { type: "boolean" },
       },
@@ -1110,6 +1116,37 @@ function bestMatch(list, q, nameOf) {
   const words = n.split(/\s+/).filter((w) => w.length > 1 && !/^(the|my|a|to)$/.test(w));
   return list.find((x) => nm(x) === n) || list.find((x) => nm(x).startsWith(n)) || list.find((x) => nm(x).includes(n))
     || (words.length ? list.find((x) => words.every((w) => nm(x).includes(w))) : null) || null;
+}
+
+// ---- Wallpaper Engine ---------------------------------------------------------------
+// Its documented CLI: "wallpaper64.exe -control <command>" talks to the running
+// app. The exe is wherever Steam put it, so it is read off the running process.
+let weExe = null;
+function wallpaperExe() {
+  if (weExe && fs.existsSync(weExe)) return Promise.resolve(weExe);
+  return new Promise((resolve) => {
+    execFile("powershell", ["-NoProfile", "-Command", "(Get-Process wallpaper64,wallpaper32 -ErrorAction SilentlyContinue | Select-Object -First 1).Path"],
+      { windowsHide: true, timeout: 8000 }, (e, out) => { const p = String(out || "").trim(); weExe = p && fs.existsSync(p) ? p : null; resolve(weExe); });
+  });
+}
+const WE_ACTIONS = {
+  next: ["nextWallpaper"], pause: ["pause"], play: ["play"], resume: ["play"], stop: ["stop"],
+  mute: ["mute"], unmute: ["unmute"], hide_icons: ["hideIcons"], show_icons: ["showIcons"],
+};
+async function wallpaperControl(action) {
+  const a = String(action || "").toLowerCase().trim();
+  const exe = await wallpaperExe();
+  if (!exe) return { ok: false, error: "Wallpaper Engine isn't running." };
+  let args = WE_ACTIONS[a.replace(/\s+/g, "_")];
+  const prof = a.match(/^profile[:\s]+(.+)$/);
+  if (prof) args = ["openProfile", "-profile", prof[1].trim()];
+  if (!args) return { ok: false, error: "unknown action; one of " + Object.keys(WE_ACTIONS).join(", ") + ", or \"profile NAME\"" };
+  return new Promise((resolve) => {
+    execFile(exe, ["-control", ...args], { windowsHide: true, timeout: 10000 }, (e) => {
+      if (e && e.killed) return resolve({ ok: false, error: "Wallpaper Engine didn't answer" });
+      resolve({ ok: true, text: { nextWallpaper: "Next wallpaper.", pause: "Wallpaper paused.", play: "Wallpaper playing.", stop: "Wallpaper stopped.", mute: "Wallpaper muted.", unmute: "Wallpaper unmuted.", hideIcons: "Desktop icons hidden.", showIcons: "Desktop icons shown.", openProfile: "Wallpaper profile " + (args[2] || "") + " applied." }[args[0]] });
+    });
+  });
 }
 
 // ---- notes: the Notes widget's text, edited line by line ---------------------------
@@ -1586,7 +1623,7 @@ function who() { return settings.name || "the user"; }
 // from the tools this model actually has — then shows it done.
 const TOOL_GUIDE = {
   info: "anything about the PC (CPU, GPU, temperatures, memory, network, what is running, uptime), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
-  panel: "this app itself: check for or install updates, switch forks, a theme, your own settings, reload",
+  panel: "this app itself: check for or install updates, switch forks, a theme, your own settings, reload; the PC's screensaver (\"screensaver\", \"go to sleep\" for the screens); Wallpaper Engine (next wallpaper, pause it)",
   layout: "what is on the screen and where: open an app, full screen (focus) and back, the Home layout (and saving a new one), show or hide widgets, put an app in a panel beside the widgets, resize, move, collapse, scenes, a sum on the calculator, pinning a window. The bracketed line says what is on screen now",
   youtube: "\"show me a video of...\", \"put on some...\" to watch: plays it, just the video, full screen unless asked otherwise; pause, resume, exit",
   web_search: "news, scores, prices, release dates, facts, anything current or anything you are not certain of",
@@ -1595,8 +1632,8 @@ const TOOL_GUIDE = {
   weather: "weather, rain, temperature, \"do I need a jacket\", any forecast",
   music: "play something, pause, resume, skip, go back, \"what is this song\"",
   volume: "louder, quieter, mute, switch speakers or headphones or microphone, one program's volume, the mic",
-  timer: "a countdown: \"in ten minutes\", \"timer for the pasta\"",
-  alarm: "a time of day: \"wake me at 7\", \"remind me at 3\"",
+  timer: "a countdown: \"in ten minutes\", \"timer for the pasta\"; and anything to do in N minutes (actions / prompt, ring false)",
+  alarm: "a time of day: \"wake me at 7\", \"remind me at 3\"; and scheduling ANY tool at a time (\"at 10 dim the lights\", \"when my alarm goes off, read me the weather\"): actions are tool calls, prompt is a request you carry out then; attach adds to an existing alarm",
   show: "lists, steps, recipes, comparisons, anything easier to read than to hear",
   remember: "anything worth keeping: preferences, people, plans, \"remember that...\"",
   recall: "\"what do you know about...\", details about a person or thing that are not already above",
@@ -1624,6 +1661,8 @@ const TOOL_EXAMPLES = [
   ["go home", "layout {action: home}", ""],
   ["write me a packing list for the weekend", "notes {action: write, text: \"# Weekend packing\\n- [ ] ...\"}", "then say it's in the notes"],
   ["tick off the eggs", "notes {action: check, find: eggs}", ""],
+  ["at 10 tonight dim the lights to 20 percent", "alarm {action: set, time: \"22:00\", label: lights down, ring: false, actions: [{tool: lights, input: {action: brightness, level: 20}}]}", ""],
+  ["when my 7 o'clock alarm goes off, give me the weather", "alarm {action: attach, time: \"07:00\", prompt: \"Good morning briefing: today's weather\"}", ""],
 ];
 
 function systemPrompt(small) {
@@ -2177,6 +2216,22 @@ async function handle(req, res, urlPath) {
   if (sub === "models" && req.method === "GET") {
     await localProbe(false);
     return json(res, 200, { ok: true, models: localModels(), needsRestart: local.needsRestart, downloads: models.list(), dir: models.modelsDir(settings) });
+  }
+  // ---- One server tool, run when an alarm or timer with work goes off ----
+  if (sub === "run" && req.method === "POST") {
+    return H.readJsonBody(req, res, async (body) => {
+      const def = toolByName.get(String(body.name || ""));
+      if (!def || def.where !== "server") return json(res, 400, { ok: false, error: "no server tool called " + body.name });
+      let flash = null;
+      try {
+        const [out, isErr] = await runServerTool(def.name, body.input || {}, (ev) => { if (ev.type === "notes") flash = ev.flash; });
+        return json(res, 200, isErr ? { ok: false, error: String(out).slice(0, 500) } : { ok: true, result: String(out).split("\nThe notes now:")[0].slice(0, 500), flash });
+      } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
+    });
+  }
+  // ---- Wallpaper Engine, through its command line (it must be running) ----
+  if (sub === "wallpaper" && req.method === "POST") {
+    return H.readJsonBody(req, res, async (body) => json(res, 200, await wallpaperControl(String(body.action || ""))));
   }
   // ---- YouTube search, for the panel's youtube tool ----
   if (sub === "youtube" && req.method === "GET") {

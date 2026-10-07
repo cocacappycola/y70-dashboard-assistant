@@ -68,6 +68,11 @@ contextBridge.exposeInMainWorld("y70native", {
   pinPlace: (opts) => ipcRenderer.invoke("y70:pin-place", opts),
   onPin: (fn) => { ipcRenderer.on("y70:pin", (_e, s) => fn(s)); },
 
+  // The PC's screensaver (Wallpaper Engine's when installed), and putting this
+  // panel back on top of it without waking the main monitor.
+  screensaver: (action) => ipcRenderer.invoke("y70:screensaver", String(action || "state")),
+  raise: () => ipcRenderer.invoke("y70:raise"),
+
   reload: () => ipcRenderer.invoke("y70:reload"),
   quit: () => ipcRenderer.invoke("y70:quit"),
   displays: () => ipcRenderer.invoke("y70:displays"),

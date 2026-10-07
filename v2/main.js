@@ -929,6 +929,51 @@ ipcMain.handle("y70:pin-state", () => pinState());
 ipcMain.handle("y70:pin-set", (_e, hwnd, title, proc) => pinSet(String(hwnd), title, proc));
 ipcMain.handle("y70:pin-clear", () => pinClear());
 ipcMain.handle("y70:pin-place", (_e, opts) => pinPlace(opts || {}));
+// ---- Screensaver, and the panel over it ------------------------------------------
+// Wallpaper Engine's screensaver is an ordinary .scr; "/s" runs it now. It
+// opens ONE topmost window across the whole desktop (measured: 4522x2560 over
+// both screens), so it covers this panel too. Raising this window
+// (setAlwaysOnTop again + moveTop, never activating) puts the panel back above
+// it while the main monitor keeps the screensaver — measured with a stand-in
+// window: z6 -> z5 over the screensaver, which kept running. Raising on every
+// "Jarvis" also covers a screensaver Windows started by itself.
+let saver = null;
+function screensaverFile() {
+  const sys = path.join(process.env.SystemRoot || "C:\\Windows", "System32");
+  const tries = [path.join(sys, "wpxscreensaver64.scr")];
+  try {
+    // The one chosen in Windows' settings, if any.
+    const out = require("child_process").execFileSync("reg", ["query", "HKCU\\Control Panel\\Desktop", "/v", "SCRNSAVE.EXE"], { encoding: "utf8", windowsHide: true });
+    const m = out.match(/SCRNSAVE\.EXE\s+REG_SZ\s+(.+)/i);
+    if (m && m[1].trim()) tries.push(m[1].trim());
+  } catch (e) {}
+  tries.push(path.join(sys, "scrnsave.scr"));      // Windows' blank screen
+  return tries.find((f) => { try { return fs.statSync(f).isFile(); } catch (e) { return false; } }) || null;
+}
+function screensaverStart() {
+  if (saver && saver.exitCode === null) return { ok: true, running: true, already: true };
+  const file = screensaverFile();
+  if (!file) return { ok: false, error: "no screensaver found" };
+  saver = spawn(file, ["/s"], { stdio: "ignore", windowsHide: false });
+  const me = saver;
+  saver.on("exit", () => { if (saver === me) saver = null; });
+  saver.on("error", () => { if (saver === me) saver = null; });
+  return { ok: true, running: true, file: path.basename(file) };
+}
+function screensaverStop() {
+  if (saver) { try { saver.kill(); } catch (e) {} saver = null; return { ok: true, running: false }; }
+  return { ok: true, running: false, note: "none of ours was running" };
+}
+function raisePanel() {
+  if (!win || win.isDestroyed()) return false;
+  win.setAlwaysOnTop(true, "screen-saver");
+  win.moveTop();
+  return true;
+}
+ipcMain.handle("y70:screensaver", (_e, action) =>
+  action === "start" ? screensaverStart() : action === "stop" ? screensaverStop() : { ok: true, running: !!(saver && saver.exitCode === null) });
+ipcMain.handle("y70:raise", () => raisePanel());
+
 ipcMain.handle("y70:displays", () => screen.getAllDisplays().map((d, i) => ({
   index: i, bounds: d.bounds, primary: d.id === screen.getPrimaryDisplay().id,
 })));

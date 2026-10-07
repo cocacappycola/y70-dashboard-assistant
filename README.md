@@ -31,6 +31,8 @@ answers out loud, puts anything worth seeing on the panel, and can do things:
 | "Put YouTube in a panel under Spotify" / "make the PC stats bigger and put it at the top" | Apps and widgets share one column of resizable panels; Jarvis knows what is on screen and where |
 | "Write me a packing list" / "add bug spray under Gear" / "tick off the tent" | The Notes widget, formatted (headings, bullets, checklists), opened and highlighted where it changed |
 | "Put 1847 times 23 on the calculator" / "pin Discord to the panel" | Drives the widgets themselves |
+| "At 10 tonight dim the lights to 20%" / "in 30 minutes turn off the lights" / "when my 7am alarm goes off, give me the weather" | Schedules any tool: alarms and timers carry actions (tool calls) and/or a prompt Jarvis carries out then; silent ones just do the work |
+| "Screensaver" / "screensaver off" / "next wallpaper" / "pause the wallpaper" | Starts Wallpaper Engine's screensaver on both screens; saying "Jarvis" brings the panel back over it while the main monitor stays in screensaver. Wallpaper Engine through its CLI |
 | "Ember theme" / "open your settings" | Themes, its settings and start-up options |
 | "Remember that…" | Shared memory |
 | "Lights purple" / "lights off" / "dim the lights to 30" | Your Govee strip: over the LAN when it has LAN control, Govee's cloud when it is Wi-Fi only |
@@ -148,6 +150,30 @@ Electron's `removeInsertedCSS` does not undo a stylesheet here (measured), so
 the rules only apply while `<html data-y70-theater>` is set and on/off flips
 the attribute; the CSS goes back in after every full page load. YouTube
 search is key-less: the results page's `ytInitialData`.
+
+### Schedules, the screensaver, Wallpaper Engine
+
+**Schedules** ride on alarms and timers (the island already shows and rings
+them): an entry can carry `actions` — tool calls, run as they are, panel tools
+in the panel and server tools through `POST /api/jarvis/run` — and/or a
+`prompt` Jarvis is asked at that moment and answers out loud; `ring: false`
+makes it silent. "attach" adds work to an alarm that already exists. A
+snoozed alarm doesn't run its work twice.
+
+**The screensaver**: Wallpaper Engine's is an ordinary `.scr`
+(`C:\Windows\System32\wpxscreensaver64.scr`); `/s` runs it now (falling back
+to the one chosen in Windows, then the blank one). It opens one topmost window
+across the whole desktop (measured: 4522x2560 over both screens), covering
+the panel too. On every "Jarvis" the panel is raised (`setAlwaysOnTop` again +
+`moveTop`, never activating) — measured with a stand-in window: it went from
+under the screensaver to over it, and the screensaver kept running. Moving the
+mouse ends the screensaver everywhere, as Windows does; whether a tap on the
+panel does depends on Wallpaper Engine.
+
+**Wallpaper Engine** has no API beyond its documented command line
+(`wallpaper64.exe -control pause | play | stop | mute | unmute |
+nextWallpaper | openProfile -profile NAME | hideIcons | showIcons`), which
+talks to the running app; the exe is found from the running process.
 
 ### How it works
 

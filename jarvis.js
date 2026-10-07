@@ -52,12 +52,14 @@
     all() { try { return JSON.parse(localStorage.getItem(TKEY) || "[]"); } catch (e) { return []; } },
     save(list) { try { localStorage.setItem(TKEY, JSON.stringify(list)); } catch (e) {} },
     left(t) { return t.pausedLeft != null ? t.pausedLeft : Math.max(0, t.endsAt - Date.now()); },
-    add(seconds, label) {
+    // extra: { actions: [{tool, input}], prompt, ring } — things to do when it ends.
+    add(seconds, label, extra) {
       const list = Timers.all();
       const t = {
         id: "t" + Date.now() + Math.random().toString(36).slice(2, 6),
         name: (label && String(label).trim()) || shortDur(seconds),
         total: seconds * 1000, endsAt: Date.now() + seconds * 1000, pausedLeft: null, fired: false,
+        ...schedExtra(extra),
       };
       list.push(t);
       Timers.save(list);
@@ -95,9 +97,9 @@
   const Alarms = {
     all() { try { return JSON.parse(localStorage.getItem(AKEY) || "[]"); } catch (e) { return []; } },
     save(list) { try { localStorage.setItem(AKEY, JSON.stringify(list)); } catch (e) {} },
-    add(time, label, days) {
+    add(time, label, days, extra) {
       const list = Alarms.all();
-      const a = { id: "a" + Date.now().toString(36), time, label: label || "", days: days || [], on: true, armedAt: Date.now(), lastFired: null, snoozeUntil: null };
+      const a = { id: "a" + Date.now().toString(36), time, label: label || "", days: days || [], on: true, armedAt: Date.now(), lastFired: null, snoozeUntil: null, ...schedExtra(extra) };
       list.push(a);
       Alarms.save(list.sort((x, y) => x.time.localeCompare(y.time)));
       return a;
@@ -123,6 +125,41 @@
       return null;
     },
   };
+  // ------------------------------------------------------------ schedules ---
+  // An alarm or a timer can carry work: actions (tool calls, run as they are)
+  // and/or a prompt (asked of Jarvis then, answered out loud). ring: false
+  // makes it silent — just the work, no bell.
+  function schedExtra(x) {
+    x = x || {};
+    const out = {};
+    const acts = (Array.isArray(x.actions) ? x.actions : []).map((a) => ({ tool: String(a.tool || a.name || ""), input: a.input || a.args || {} })).filter((a) => a.tool);
+    if (acts.length) out.actions = acts.slice(0, 8);
+    if (x.prompt && String(x.prompt).trim()) out.prompt = String(x.prompt).trim().slice(0, 500);
+    if (x.ring === false) out.ring = false;
+    return out;
+  }
+  const hasWork = (x) => !!((x.actions && x.actions.length) || x.prompt);
+  const CLIENT_TOOLS = new Set(["timer", "alarm", "music", "show", "panel", "layout", "youtube", "open_web", "download_model", "open_app"]);
+  async function runScheduled(item, what) {
+    const done = [];
+    for (const act of item.actions || []) {
+      try {
+        if (CLIENT_TOOLS.has(act.tool)) done.push(act.tool + ": " + (await runClientTool({ name: act.tool, input: act.input })));
+        else {
+          const r = await post("run", { name: act.tool, input: act.input });
+          done.push(act.tool + ": " + (r.ok ? r.result : "failed — " + (r.error || "?")));
+          if (act.tool === "notes" && r.ok) showNotes(r.flash);
+        }
+      } catch (e) { done.push(act.tool + ": failed — " + (e.message || e)); }
+    }
+    if (item.prompt) { ask(item.prompt); return; }
+    if (done.length) {
+      J.note = "⏰ " + (item.label || item.name || what) + " — " + done.map((s) => s.slice(0, 80)).join(" · ");
+      openCard(); renderJarvis(); scheduleClose(15000);
+    }
+  }
+  const workTag = (x) => (hasWork(x) ? " (then: " + [...(x.actions || []).map((a) => a.tool), x.prompt ? "\"" + x.prompt.slice(0, 40) + "\"" : null].filter(Boolean).join(", ") + (x.ring === false ? ", silent" : "") + ")" : "");
+
   function parseDays(days) {
     const out = new Set();
     for (const raw of [].concat(days || [])) {
@@ -230,7 +267,10 @@
     for (const t of Timers.all()) {
       if (Timers.left(t) <= 0 && t.pausedLeft == null && !t.fired) {
         Timers.update(t.id, (x) => { x.fired = true; });
-        startRing({ kind: "timer", id: t.id, label: t.name, title: "Timer done" });
+        if (hasWork(t)) runScheduled(t, "Timer");
+        // A silent one is just its work; it goes once that has started.
+        if (t.ring === false) Timers.remove(t.id);
+        else startRing({ kind: "timer", id: t.id, label: t.name, title: "Timer done" });
         break;
       }
     }
@@ -254,7 +294,9 @@
       const dayOk = !a.days.length || a.days.includes(d.getDay());
       if (due && dayOk && a.lastFired !== dayKey(d)) {
         Alarms.update(a.id, (x) => { x.lastFired = dayKey(d); if (!x.days.length) x.on = false; });
-        startRing({ kind: "alarm", id: a.id, label: a.label, title: fmtAlarm(a.time) });
+        // Its work runs once, at the time (not again on a snooze).
+        if (hasWork(a)) runScheduled(a, fmtAlarm(a.time));
+        if (a.ring !== false) startRing({ kind: "alarm", id: a.id, label: a.label, title: fmtAlarm(a.time) });
       }
     }
     renderIsland();
@@ -980,9 +1022,9 @@
           const s = Math.round(Number(a.seconds));
           if (!(s > 0)) return "How long? seconds is required.";
           audio();
-          const t = Timers.add(s, a.label);
+          const t = Timers.add(s, a.label, a);
           renderAll();
-          return "Timer \"" + t.name + "\" set for " + human(s) + "; it ends at " + clock(t.endsAt) + ".";
+          return "Timer \"" + t.name + "\" set for " + human(s) + "; it ends at " + clock(t.endsAt) + workTag(t) + ".";
         }
         if (a.action === "cancel") {
           const list = Timers.all();
@@ -994,7 +1036,7 @@
           return gone.length ? "Cancelled " + gone.length + " timer" + (gone.length > 1 ? "s" : "") + "." : "No timer matched.";
         }
         const list = Timers.all().filter((t) => Timers.left(t) > 0);
-        return list.length ? JSON.stringify(list.map((t) => ({ label: t.name, left: human(Timers.left(t) / 1000), paused: t.pausedLeft != null }))) : "No timers running.";
+        return list.length ? JSON.stringify(list.map((t) => ({ label: t.name, left: human(Timers.left(t) / 1000), paused: t.pausedLeft != null, then: workTag(t) || undefined }))) : "No timers running.";
       }
       case "alarm": {
         if (a.action === "set") {
@@ -1003,10 +1045,29 @@
           const time = m[1].padStart(2, "0") + ":" + m[2];
           const days = parseDays(a.days);
           audio();
-          const al = Alarms.add(time, a.label, days);
+          const al = Alarms.add(time, a.label, days, a);
           renderAll(); renderClock();
           const nx = Alarms.next(al);
-          return "Alarm set for " + fmtAlarm(time) + " (" + describeDays(days) + ")" + (nx ? ", next ringing " + relDay(nx) + " at " + clock(nx) : "") + ".";
+          const verb = al.ring === false ? "Scheduled for " : "Alarm set for ";
+          return verb + fmtAlarm(time) + " (" + describeDays(days) + ")" + (nx ? ", next " + relDay(nx) + " at " + clock(nx) : "") + workTag(al) + ".";
+        }
+        if (a.action === "attach") {
+          // Work added to an alarm that already exists ("when my 7 o'clock goes off...").
+          const tm = String(a.time || "").match(/^(\d{1,2}):(\d{2})/);
+          const t = tm ? tm[1].padStart(2, "0") + ":" + tm[2] : null;
+          const q = String(a.label || "").toLowerCase().trim();
+          const al = Alarms.all().find((x) => (t && x.time === t) || (q && x.label.toLowerCase().includes(q)));
+          if (!al) return "No alarm like that. Alarms: " + (Alarms.all().map((x) => fmtAlarm(x.time) + (x.label ? " " + x.label : "")).join(", ") || "none") + ".";
+          const add = schedExtra(a);
+          if (!hasWork(add)) return "Attach what? Give actions or a prompt.";
+          Alarms.update(al.id, (x) => {
+            if (add.actions) x.actions = (x.actions || []).concat(add.actions).slice(0, 8);
+            if (add.prompt) x.prompt = add.prompt;
+            if (a.ring === false) x.ring = false;
+          });
+          const now = Alarms.all().find((x) => x.id === al.id);
+          renderAll();
+          return "The " + fmtAlarm(now.time) + " alarm will also do this" + workTag(now) + ".";
         }
         if (a.action === "cancel") {
           const list = Alarms.all();
@@ -1019,7 +1080,7 @@
           return gone.length ? "Removed " + gone.length + " alarm" + (gone.length > 1 ? "s" : "") + "." : "No alarm matched.";
         }
         const list = Alarms.all();
-        return list.length ? JSON.stringify(list.map((x) => ({ time: fmtAlarm(x.time), label: x.label, repeats: describeDays(x.days), on: x.on }))) : "No alarms set.";
+        return list.length ? JSON.stringify(list.map((x) => ({ time: fmtAlarm(x.time), label: x.label, repeats: describeDays(x.days), on: x.on, then: workTag(x) || undefined }))) : "No alarms set.";
       }
       case "music": return musicTool(a);
       case "show":
@@ -1173,6 +1234,21 @@
         const el = $("#passive-lock");
         if (el) { el.textContent = "Never take focus: " + (on ? "ON" : "off"); el.classList.toggle("is-on", !!on); }
         return "Never take focus is " + onOff(on) + ".";
+      }
+      case "screensaver": {
+        if (!nat || !nat.screensaver) return NO_NATIVE;
+        // After the reply has been heard, or the screensaver would cut it off.
+        J.afterReply = async () => { await nat.screensaver("start"); };
+        return "Starting the screensaver on both screens as soon as you've heard this. Say \"Jarvis\" and the panel comes back over it while the main monitor stays in screensaver; moving the mouse ends it everywhere.";
+      }
+      case "screensaver_off": {
+        if (!nat || !nat.screensaver) return NO_NATIVE;
+        const r = await nat.screensaver("stop");
+        return r && r.note ? "There was no screensaver of mine running (moving the mouse ends one Windows started)." : "Screensaver off.";
+      }
+      case "wallpaper": {
+        const r = await fetch(API + "wallpaper", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: a.name }) }).then((x) => x.json()).catch((e) => ({ ok: false, error: e.message }));
+        return r.ok ? r.text : "Wallpaper Engine: " + r.error;
       }
       case "start_with_windows":
       case "taskbar_icon": {
@@ -1617,6 +1693,9 @@
         return;
       case "wake":
         audio();
+        // A screensaver (ours or Windows') may be over the panel: come back
+        // above it, without waking the main monitor.
+        if (native && native.raise) native.raise().catch(() => {});
         if (ring) { stopRing(ring.kind === "alarm"); return; }      // "Jarvis" silences a ringing alarm (snoozes it)
         if (J.mode === "speaking") speech.reset();
         if (ev.tail && ev.tail.split(/\s+/).length >= 2) { chime.listen(); ask(ev.tail); }
