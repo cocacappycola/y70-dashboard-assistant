@@ -21,9 +21,14 @@ answers out loud, puts anything worth seeing on the panel, and can do things:
 | "What's the weather tomorrow?" | Spoken answer plus a forecast card |
 | "Who won the F1 race?" / "summarise that article" | Web search (and page reading), answered from sources |
 | "Show me a western fence lizard" | Pictures on the panel; tap one to see it big |
-| "Turn it down a bit" / "mute Discord" | System volume / Discord voice |
+| "Turn it down a bit" / "switch to my XM5s" / "turn Discord down to 60" / "mute my mic" | Speakers, default devices, per-program volume, the microphone |
+| "Who's in my channel?" / "join Gaming 2" / "leave" / "turn Riley up" / "deafen me" | Discord: the channel, who's talking, joining and leaving, everyone's volume |
+| "How's my PC doing?" / "how much have I spent on Claude today?" / "what's my phone battery?" | Reads the dashboard's own data: CPU, GPU, temperatures, network, busiest programs; Claude usage; the iPhone's battery, notifications and calls |
+| "Answer it" / "decline the call" | The iPhone, over the panel's Bluetooth bridge |
+| "Any updates?" / "install it" / "switch to the main fork" | The app itself: checks for and installs updates (restarting after he's said so), switches forks |
+| "Open YouTube" / "gaming layout" / "show the PC widget" / "Ember theme" / "open your settings" | Drives the panel: apps, scenes, widgets, themes, its settings and start-up options |
 | "Remember that…" / "add milk to my notes" | Shared memory / the Notes widget |
-| "Lights purple" / "lights off" / "dim the lights to 30" | Your Govee strip, over the LAN |
+| "Lights purple" / "lights off" / "dim the lights to 30" | Your Govee strip: over the LAN when it has LAN control, Govee's cloud when it is Wi-Fi only |
 | "Download Qwen 3.5 27B" / "find me a coding model" | Finds GGUF builds on Hugging Face, opens the page, downloads after you tap |
 
 "Jarvis, set a timer for five minutes" works in one breath: the name and the
@@ -50,8 +55,8 @@ box to type into instead.
    a `-ngl` on the bat's command line overrides every model's own value
    (measured — it turned the 27B's 56 into 99). With *Use the 4B while gaming*
    on, a game in front switches to the 4B and unloads whatever else is loaded.
-   Big models (14B and up) get every tool and the whole memory; small ones a
-   short list.
+   Big models (14B and up) get every tool and the whole memory; small ones
+   every tool but the notes, and a shorter slice of the memory.
 3. **More models.** "Jarvis, download …" (or Settings → Jarvis → *Get a model*)
    searches Hugging Face for GGUF builds and picks the quant that fits the 16 GB
    card. Jarvis opens the model's page in the panel's **Web** app with a
@@ -102,17 +107,20 @@ box to type into instead.
    the file; the server takes ~1.4 s a call. "Remember Jake plays bass" files it
    under Jake; the settings list every entity and fact, each deletable. All of it
    goes into each request to whichever brain answers.
-7. **Lights.** Govee Desktop has **no API** another program can use — it listens
-   on no port and opens no pipe (checked, v2.40.60). The workaround is Govee's
-   own **LAN API**, the one Govee Desktop and Home Assistant use: UDP to the
-   light, no account, no key, Govee Desktop keeps working alongside. Names come
-   from Govee Desktop's device list. Govee Desktop holds UDP 4002 (where lights
-   answer) exclusively, so Jarvis binds the LAN address's 4002 instead, which
-   Windows allows, and falls back to the light's MAC in the ARP table. Because
-   UDP has no receipt, a light not heard from for 5 minutes must answer a ping
-   before Jarvis says it did anything. *LAN Control* must be on for the light
-   in the Govee Home app. A Govee API key (Govee Home → Profile → Settings →
-   Apply for API Key) adds scenes and control away from the LAN.
+7. **Lights.** Two routes. Lights with *LAN Control* get Govee's **LAN API**
+   (UDP straight to the light, no account, no key — what Home Assistant uses).
+   **Wi-Fi-only lights** — like the H619E strip here, which is on Wi-Fi at its
+   own address but never answers LAN — only go through **Govee's cloud API**,
+   which needs a Govee API key (Govee Home → Profile → Settings → Apply for API
+   Key; it is emailed), pasted into Settings → Jarvis → Lights. The key is
+   checked with Govee before it is kept, and adds scenes too. Jarvis asks a light
+   over LAN once, remembers the silence for 30 minutes, and goes straight to the
+   cloud meanwhile (which, unlike UDP, says whether the command landed).
+   Govee Desktop *does* have an API for other programs (`GoveeAPI.dll`, JSON over
+   `\\.\pipe\GoveeDesktopPipe` after a GUID from its Settings → API), but it is a
+   wrapper around the same LAN packets and refuses lights that aren't on LAN, so
+   Jarvis doesn't use it. Names come from Govee Desktop's device list; a light's
+   address from a LAN scan or its MAC in the ARP table.
 
 ### How it works
 
@@ -125,10 +133,15 @@ box to type into instead.
 - `assistant.js` — the loop. Conversations are stored as Claude content blocks
   and translated for llama-server's OpenAI endpoint, so either brain can pick a
   conversation up. Tools that touch the PC run on the server (search, weather,
-  volume, Discord, notes, memory); tools that touch the panel (timers, alarms,
-  music, showing cards, opening apps) are handed to the panel, which runs them
-  and posts the results back. The local model gets the ten core tools — small
-  models choose far more reliably from a short list. Two web searches per
+  sound, Discord, the phone, notes, memory, and `info` — one read of anything
+  the dashboard knows: PC stats, phone, Discord, audio, media, Claude usage,
+  lights, local models); tools that touch the panel (timers, alarms, music,
+  showing cards, and `panel` — the app itself: updates, forks, apps, widgets,
+  scenes, themes, settings) are handed to the panel, which runs them with the
+  shell's own functions and `window.y70native`, and posts the results back. A
+  restart or reload he promises waits until the reply has been heard. Small
+  local models get every tool but the notes, each a single tool with an
+  `action`, so the list stays short enough to choose from well. Two web searches per
   question at most, and the last step runs with tools off, so every turn ends
   in an answer.
 - `assistant-web.js` + `search-ddgs.py` — key-less search. The `ddgs` Python

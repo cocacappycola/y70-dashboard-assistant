@@ -435,6 +435,55 @@ async function action(name, args) {
       return { ok: true, voice: dc.voice };
     }
     case "refresh": await refreshChannel(); return { ok: true };
+
+    // ---- for Jarvis: servers, channels, joining and leaving, volumes ----
+    // All of these sit under the `rpc` scope the app is already authorised for.
+    case "guilds": {
+      if (!dc.authed) return { ok: false, error: "not authorised yet" };
+      const r = await cmd("GET_GUILDS", {});
+      if (!r.ok) return r;
+      return { ok: true, guilds: ((r.data && r.data.guilds) || []).map((g) => ({ id: g.id, name: g.name })) };
+    }
+    case "channels": {
+      if (!dc.authed) return { ok: false, error: "not authorised yet" };
+      const r = await cmd("GET_CHANNELS", { guild_id: String(args.guildId || "") });
+      if (!r.ok) return r;
+      // type 2 = voice, 13 = stage; the rest are text, categories, forums.
+      return {
+        ok: true,
+        channels: ((r.data && r.data.channels) || []).map((c) => ({ id: c.id, name: c.name, voice: c.type === 2 || c.type === 13 })),
+      };
+    }
+    case "joinVoice":
+    case "leaveVoice": {
+      if (!dc.authed) return { ok: false, error: "not authorised yet" };
+      const r = await cmd("SELECT_VOICE_CHANNEL", name === "joinVoice"
+        ? { channel_id: String(args.channelId || ""), force: true }
+        : { channel_id: null });
+      if (!r.ok) return r;
+      await refreshChannel();
+      return { ok: true, channel: dc.channel ? dc.channel.name : null };
+    }
+    case "setVolumes": {
+      // Discord's own sliders: input 0-100, output 0-200.
+      if (!dc.authed) return { ok: false, error: "not authorised yet" };
+      const payload = {};
+      if (args.input != null) payload.input = { volume: Math.max(0, Math.min(100, Number(args.input))) };
+      if (args.output != null) payload.output = { volume: Math.max(0, Math.min(200, Number(args.output))) };
+      const r = await cmd("SET_VOICE_SETTINGS", payload);
+      if (!r.ok) return r;
+      dc.voice = shapeVoice(r.data) || dc.voice;
+      return { ok: true, voice: dc.voice };
+    }
+    case "setUserVoice": {
+      // One person's volume (0-200, 100 = normal) or a local mute.
+      if (!dc.authed) return { ok: false, error: "not authorised yet" };
+      const payload = { user_id: String(args.userId || "") };
+      if (args.volume != null) payload.volume = Math.max(0, Math.min(200, Number(args.volume)));
+      if (args.mute != null) payload.mute = !!args.mute;
+      const r = await cmd("SET_USER_VOICE_SETTINGS", payload);
+      return r.ok ? { ok: true } : r;
+    }
     default: return { ok: false, error: "unknown action: " + name };
   }
 }

@@ -884,10 +884,13 @@ const TOOLS = [
   },
   {
     name: "volume", where: "server", core: true,
-    description: "PC output volume. set takes level 0-100; up and down step by 10 unless amount is given; mute and unmute.",
+    description: "PC sound. set takes level 0-100; up and down step by 10 unless amount is given; mute and unmute the speakers. output / input switch the default speakers or microphone to the device named in device. mic_mute, mic_unmute. app sets one program's volume (app = its name, level 0-100, or mute true/false). list returns devices and programs.",
     input_schema: {
       type: "object",
-      properties: { action: { type: "string", enum: ["set", "up", "down", "mute", "unmute"] }, level: { type: "integer" }, amount: { type: "integer" } },
+      properties: {
+        action: { type: "string", enum: ["set", "up", "down", "mute", "unmute", "output", "input", "mic_mute", "mic_unmute", "app", "list"] },
+        level: { type: "integer" }, amount: { type: "integer" }, device: { type: "string" }, app: { type: "string" }, mute: { type: "boolean" },
+      },
       required: ["action"],
     },
   },
@@ -982,14 +985,40 @@ const TOOLS = [
     },
   },
   {
-    name: "open_app", where: "client", core: false,
-    description: "Bring one of the panel's apps to the front.",
-    input_schema: { type: "object", properties: { app: { type: "string", enum: ["spotify", "weather", "youtube", "shorts", "tiktok", "snapchat"] } }, required: ["app"] },
+    name: "info", where: "server", core: true,
+    description: "Everything the dashboard knows, to answer from. about: pc (CPU, GPU, temperatures, memory, network, busiest programs, uptime), phone (iPhone battery, notifications, calls), discord (voice channel, who is in it and talking, mute/deafen), audio (speakers, microphones, per-program volume), media (what is playing on the PC), claude_usage (Claude tokens and cost today, this month), lights, local_models, or everything.",
+    input_schema: {
+      type: "object",
+      properties: { about: { type: "string", enum: ["everything", "pc", "phone", "discord", "audio", "media", "claude_usage", "lights", "local_models"] } },
+      required: ["about"],
+    },
   },
   {
-    name: "discord", where: "server", core: false,
-    description: "Discord voice: mute or unmute the microphone, deafen or undeafen.",
-    input_schema: { type: "object", properties: { action: { type: "string", enum: ["mute", "unmute", "deafen", "undeafen"] } }, required: ["action"] },
+    name: "panel", where: "client", core: true,
+    description: "This dashboard app itself. status (version, update, fork, what is open). check_updates; install_update restarts the app into a downloaded update (only when the user asks). switch_fork (fork: main or jarvis) downloads the other line of the app; install_update then switches. open an app (spotify, weather, youtube, shorts, tiktok, snapchat, web). widget (name, on: true/false) shows or hides a widget (claude, weather, pc, calc, media, lyrics, audio, timer, notes, discord, face, pin). scene (name: working, gaming, music, idle). theme (name). settings opens a page (jarvis, appearance, drawer, close). reload. keyboard, never_take_focus, start_with_windows, taskbar_icon take on: true/false.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["status", "check_updates", "install_update", "switch_fork", "cancel_fork_switch", "open", "widget", "scene", "theme", "settings", "reload", "keyboard", "never_take_focus", "start_with_windows", "taskbar_icon"],
+        },
+        name: { type: "string" }, app: { type: "string" }, fork: { type: "string" }, on: { type: "boolean" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "discord", where: "server", core: true,
+    description: "Discord voice. mute, unmute, deafen, undeafen. status: the channel, who is in it and who is talking. join (channel name, optional server) and leave a voice channel. channels lists a server's voice channels (server optional). input_volume (level 0-100) and output_volume (level 0-200) are Discord's own sliders. user_volume sets one person's volume (user, level 0-200, 100 is normal); user_mute (user, mute true/false) mutes them for you only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["status", "mute", "unmute", "deafen", "undeafen", "join", "leave", "channels", "input_volume", "output_volume", "user_volume", "user_mute"] },
+        channel: { type: "string" }, server: { type: "string" }, user: { type: "string" }, level: { type: "integer" }, mute: { type: "boolean" },
+      },
+      required: ["action"],
+    },
   },
   {
     name: "notes", where: "server", core: false,
@@ -997,14 +1026,13 @@ const TOOLS = [
     input_schema: { type: "object", properties: { action: { type: "string", enum: ["read", "append"] }, text: { type: "string" } }, required: ["action"] },
   },
   {
-    name: "pc_status", where: "server", core: false,
-    description: "How the PC is doing right now: CPU, GPU, memory, temperatures, network.",
-    input_schema: { type: "object", properties: {} },
-  },
-  {
-    name: "phone", where: "server", core: false,
-    description: "The user's iPhone: recent notifications and battery level.",
-    input_schema: { type: "object", properties: {} },
+    name: "phone", where: "server", core: true,
+    description: "The user's iPhone, over Bluetooth. answer, decline or hang_up the current call. dismiss a notification from the panel's list (app or index from info), or clear them all. To read the phone, use info about phone.",
+    input_schema: {
+      type: "object",
+      properties: { action: { type: "string", enum: ["answer", "decline", "hang_up", "dismiss", "clear"] }, app: { type: "string" }, index: { type: "integer" } },
+      required: ["action"],
+    },
   },
 ];
 const toolByName = new Map(TOOLS.map((t) => [t.name, t]));
@@ -1019,9 +1047,169 @@ function openaiTools(all) {
   }));
 }
 
-async function selfGet(p) {
-  const r = await fetch("http://127.0.0.1:" + H.PORT + p);
-  return r.json();
+// The dashboard's own endpoints (PC stats, phone, Claude usage), as the
+// widgets read them.
+async function selfJson(p, body, ms) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms || 8000);
+  try {
+    const r = await fetch("http://127.0.0.1:" + H.PORT + p, body
+      ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: ctl.signal }
+      : { signal: ctl.signal });
+    return await r.json();
+  } catch (e) { return { ok: false, error: e.name === "AbortError" ? "timed out" : e.message }; }
+  finally { clearTimeout(t); }
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// "the headphones" -> "XM5-Wired (Realtek USB Audio)": exact, then prefix,
+// then contains, then every word somewhere in the name.
+function bestMatch(list, q, nameOf) {
+  const n = String(q || "").toLowerCase().trim();
+  if (!n) return null;
+  const nm = (x) => String(nameOf(x) || "").toLowerCase();
+  const words = n.split(/\s+/).filter((w) => w.length > 1 && !/^(the|my|a|to)$/.test(w));
+  return list.find((x) => nm(x) === n) || list.find((x) => nm(x).startsWith(n)) || list.find((x) => nm(x).includes(n))
+    || (words.length ? list.find((x) => words.every((w) => nm(x).includes(w))) : null) || null;
+}
+
+// ---- info: what the dashboard knows, section by section ----------------------
+const pct = (v) => (v == null ? null : Math.round(v * 100));
+const INFO = {
+  async pc() {
+    let s = await selfJson("/api/pcstats");
+    if (s.warming) { await sleep(2600); s = await selfJson("/api/pcstats"); }
+    if (!s || s.ok === false) return { error: (s && s.error) || "no PC stats" };
+    return {
+      cpu: s.cpu && { pct: s.cpu.pct, tempC: s.cpu.tempC, name: String(s.cpu.name || "").trim(), threads: s.cpu.cores },
+      gpu: s.gpu && { name: s.gpu.name, pct: s.gpu.util, tempC: s.gpu.temp, vramUsedMB: s.gpu.memUsed, vramTotalMB: s.gpu.memTotal },
+      ram: s.ram,
+      net: s.net && { downMbps: +(s.net.downBps * 8 / 1e6).toFixed(2), upMbps: +(s.net.upBps * 8 / 1e6).toFixed(2) },
+      uptimeHours: s.uptime ? +(s.uptime / 3600).toFixed(1) : null,
+      busiest: (s.busiest || []).slice(0, 5).map((p) => ({ name: p.name, diskAndNetMBps: +(p.ioBps / 1e6).toFixed(2) })),
+      online: (s.talkers || []).slice(0, 5).map((p) => ({ name: p.name, connections: p.conns, hosts: p.hosts })),
+      game: game.on ? (game.exe || "fullscreen") : null,
+    };
+  },
+  async phone() {
+    const s = await selfJson("/api/phone");
+    if (!s || s.ok === false) return { error: (s && s.error) || "no phone bridge" };
+    return {
+      connected: s.connected, device: s.device, battery: s.battery,
+      call: s.call ? { from: s.call.from, detail: s.call.detail || undefined, answered: !!s.call.accepted } : null,
+      notifications: (s.notifications || []).slice(0, 15).map((n, i) => ({ index: i, app: n.app, title: n.title, message: n.message, at: n.date })),
+      note: s.connected ? undefined : "The iPhone isn't connected to the panel's Bluetooth bridge right now.",
+    };
+  },
+  async discord() {
+    const s = discord.status();
+    if (!s.configured) return { error: "Discord isn't set up in the panel (Discord widget)." };
+    if (!s.connected) return { error: "Discord isn't running, or the panel can't reach it." };
+    if (!s.authed) return { error: "Discord is running but the panel isn't authorised yet (Discord widget > Authorise)." };
+    return {
+      me: s.user && s.user.name,
+      mute: s.voice && s.voice.mute, deaf: s.voice && s.voice.deaf,
+      inputVolume: s.voice && s.voice.inputVolume, outputVolume: s.voice && s.voice.outputVolume,
+      channel: s.channel ? {
+        name: s.channel.name,
+        members: s.channel.members.map((m) => ({ name: m.name, me: m.me || undefined, speaking: m.speaking || undefined, muted: m.mute || undefined, deafened: m.deaf || undefined })),
+      } : null,
+    };
+  },
+  async audio() {
+    const au = H.sysState() && H.sysState().audio;
+    if (!au) { await sleep(1500); }
+    const a = H.sysState() && H.sysState().audio;
+    if (!a) return { error: "the sound helper isn't ready" };
+    const dev = (d) => ({ name: d.name, default: d.isDefault || undefined, volume: pct(d.volume), muted: d.muted || undefined });
+    return {
+      speakers: (a.outputs || []).map(dev),
+      microphones: (a.inputs || []).map(dev),
+      programs: (a.sessions || []).map((s) => ({ name: s.name, volume: pct(s.volume), muted: s.muted || undefined, playing: s.active || undefined })),
+    };
+  },
+  async media() {
+    const st = H.sysState();
+    const m = st && st.media;
+    if (!m || !m.title) return { playing: false, note: "Nothing is playing on the PC." };
+    return { app: m.app, title: m.title, artist: m.artist, album: m.album, playing: m.playing, positionS: Math.round(m.position / 1000), lengthS: Math.round(m.duration / 1000) };
+  },
+  async claude_usage() {
+    const s = await selfJson("/api/claude-stats");
+    if (!s || !s.ok) return { error: (s && s.error) === "no_data" ? "no Claude Code usage recorded on this PC" : (s && s.error) || "no stats" };
+    const money = (c) => "$" + (c || 0).toFixed(2);
+    return {
+      today: { tokens: s.today.tok, cost: money(s.today.cost), messages: s.today.msgs, sessions: s.today.sessions },
+      thisMonth: { tokens: s.month.tok, cost: money(s.month.cost) },
+      allTime: { tokens: s.allTime.tok, cost: money(s.allTime.cost), messages: s.allTime.msgs },
+      last7Days: (s.days || []).map((d) => ({ day: d.label, tokens: d.tok, cost: money(d.cost) })),
+      topModel30Days: s.topModel,
+    };
+  },
+  async lights() { return govee.status(); },
+  async local_models() {
+    await localProbe(true);
+    return { serverUp: local.up, loaded: local.loaded, models: localModels(), needsRestart: local.needsRestart, downloads: models.list() };
+  },
+};
+async function info(about) {
+  const one = INFO[about];
+  if (one) return one();
+  // everything: every section at once, each given a few seconds.
+  const keys = Object.keys(INFO);
+  const out = {};
+  await Promise.all(keys.map(async (k) => {
+    out[k] = await Promise.race([INFO[k]().catch((e) => ({ error: e.message })), sleep(6000).then(() => ({ error: "took too long" }))]);
+  }));
+  // Trim the long lists down to what a summary needs.
+  if (out.audio && out.audio.speakers) {
+    out.audio = {
+      speakers: (out.audio.speakers.find((d) => d.default) || {}).name,
+      microphone: (out.audio.microphones.find((d) => d.default) || {}).name,
+      volume: (out.audio.speakers.find((d) => d.default) || {}).volume,
+      playingPrograms: out.audio.programs.filter((p) => p.playing).map((p) => p.name),
+    };
+  }
+  if (out.phone && out.phone.notifications) out.phone.notifications = out.phone.notifications.slice(0, 5);
+  if (out.claude_usage && out.claude_usage.last7Days) delete out.claude_usage.last7Days;
+  if (out.local_models && out.local_models.models) out.local_models.models = out.local_models.models.map((m) => m.id + (m.loaded ? " (loaded)" : ""));
+  return out;
+}
+
+// Discord's servers and their channels change rarely; looked up on demand.
+let dcCache = { at: 0, guilds: null, channels: new Map() };
+async function discordVoiceChannels(server) {
+  if (Date.now() - dcCache.at > 10 * 60 * 1000) dcCache = { at: Date.now(), guilds: null, channels: new Map() };
+  if (!dcCache.guilds) {
+    const g = await discord.action("guilds");
+    if (!g.ok) return g;
+    dcCache.guilds = g.guilds;
+  }
+  let guilds = dcCache.guilds;
+  if (server) {
+    const g = bestMatch(guilds, server, (x) => x.name);
+    if (!g) return { ok: false, error: "You aren't in a server called " + server + ". Servers: " + guilds.map((x) => x.name).slice(0, 25).join(", ") };
+    guilds = [g];
+  } else {
+    // The server you are already in first.
+    const cur = discord.status().channel;
+    if (cur && cur.guild) guilds = guilds.filter((x) => x.id === cur.guild).concat(guilds.filter((x) => x.id !== cur.guild));
+  }
+  const out = [];
+  for (const g of guilds.slice(0, 40)) {
+    if (!dcCache.channels.has(g.id)) {
+      const c = await discord.action("channels", { guildId: g.id });
+      dcCache.channels.set(g.id, c.ok ? c.channels.filter((x) => x.voice) : []);
+    }
+    for (const c of dcCache.channels.get(g.id)) out.push({ ...c, server: g.name });
+  }
+  return { ok: true, channels: out };
+}
+function discordMember(user) {
+  const ch = discord.status().channel;
+  if (!ch) return { error: "You aren't in a voice channel." };
+  const m = bestMatch(ch.members.filter((x) => !x.me), user, (x) => x.name);
+  return m ? { member: m } : { error: "Nobody called " + user + " is in " + ch.name + ". In it: " + ch.members.map((x) => x.name).join(", ") };
 }
 
 // Runs a server-side tool. Returns [resultForModel, isError]. `emit` puts
@@ -1055,8 +1243,43 @@ async function runServerTool(name, input, emit) {
       return [JSON.stringify(r)];
     }
     case "volume": {
-      const st = H.sysState();
-      const out = st && st.audio && (st.audio.outputs || []).find((d) => d.default);
+      let st = H.sysState();
+      if (!st || !st.audio) { await sleep(1500); st = H.sysState(); }
+      const au = st && st.audio;
+      if (!au) return ["The sound helper isn't ready yet; try again in a moment.", true];
+      // The helper calls it isDefault (reading `default` here always missed,
+      // so "up" used to start from a guessed 50).
+      const out = (au.outputs || []).find((d) => d.isDefault);
+      const names = (list) => (list || []).map((d) => d.name).join(", ");
+      if (a.action === "list") return [JSON.stringify((await INFO.audio()))];
+      if (a.action === "output" || a.action === "input") {
+        const list = a.action === "output" ? au.outputs : au.inputs;
+        const what = a.action === "output" ? "speakers" : "microphone";
+        const d = bestMatch(list || [], a.device, (x) => x.name);
+        if (!d) return ["No " + what + " called \"" + (a.device || "") + "\". There are: " + names(list), true];
+        if (d.isDefault) return [d.name + " is already the default " + what + "."];
+        const m = await H.sysSend("audio.setDefault", { id: d.id });
+        return m.ok ? [(a.action === "output" ? "Sound now plays through " : "The microphone is now ") + d.name + "."] : [m.error || "failed", true];
+      }
+      if (a.action === "mic_mute" || a.action === "mic_unmute") {
+        const m = await H.sysSend("audio.micMute", { mute: a.action === "mic_mute" });
+        return m.ok ? ["Microphone " + (a.action === "mic_mute" ? "muted" : "unmuted") + " (Windows-wide)."] : [m.error || "failed", true];
+      }
+      if (a.action === "app") {
+        // The panel's own Spotify, YouTube, TikTok and Jarvis's voice all play
+        // inside the dashboard, so they share its one Windows sound session.
+        const panelSound = /spotify|youtube|tiktok|shorts|snapchat|panel|dashboard|jarvis|y70/i.test(a.app || "");
+        const s = bestMatch(au.sessions || [], a.app, (x) => x.name)
+          || (panelSound ? (au.sessions || []).find((x) => /^Y70 Dashboard$/i.test(x.name)) : null);
+        if (!s) return ["No program called \"" + (a.app || "") + "\" has sound open. These do: " + names(au.sessions), true];
+        const args = { name: s.name };
+        if (a.level != null) args.volume = Math.max(0, Math.min(100, Number(a.level))) / 100;
+        if (a.mute != null) args.mute = !!a.mute;
+        if (args.volume == null && args.mute == null) return ["Give level (0-100) or mute.", true];
+        const m = await H.sysSend("audio.session", args);
+        if (!m.ok || !(m.data && m.data.matched)) return [(m && m.error) || "Windows didn't change " + s.name + ".", true];
+        return [s.name + (args.volume != null ? " volume " + pct(s.volume) + " -> " + Math.round(args.volume * 100) : "") + (args.mute != null ? (args.mute ? " muted" : " unmuted") : "") + "."];
+      }
       const cur = out ? Math.round((out.volume || 0) * 100) : 50;
       let level = cur;
       if (a.action === "mute" || a.action === "unmute") {
@@ -1097,11 +1320,53 @@ async function runServerTool(name, input, emit) {
       }))) + "\nThe options are on screen with Download buttons. To fetch one, call download_model with its repo and file."];
     }
     case "discord": {
+      const s = await INFO.discord();
+      if (s.error) return [s.error, true];
       const map = { mute: ["setMute", true], unmute: ["setMute", false], deafen: ["setDeaf", true], undeafen: ["setDeaf", false] };
-      const m = map[a.action];
-      if (!m) return ["unknown action", true];
-      const r = await discord.action(m[0], { value: m[1] });
-      return r.ok ? ["done: " + JSON.stringify(r.voice || {})] : [r.error || "Discord isn't connected", true];
+      if (map[a.action]) {
+        const m = map[a.action];
+        const r = await discord.action(m[0], { value: m[1] });
+        return r.ok ? ["Done. Now: " + (r.voice.deaf ? "deafened" : r.voice.mute ? "muted" : "mic live") + "."] : [r.error || "Discord didn't answer", true];
+      }
+      switch (a.action) {
+        case "status": return [JSON.stringify(s)];
+        case "leave": {
+          if (!s.channel) return ["You aren't in a voice channel."];
+          const r = await discord.action("leaveVoice");
+          return r.ok ? ["Left " + s.channel.name + "."] : [r.error, true];
+        }
+        case "channels": {
+          const r = await discordVoiceChannels(a.server);
+          if (!r.ok) return [r.error, true];
+          return [JSON.stringify(r.channels.slice(0, 60).map((c) => c.server + " / " + c.name))];
+        }
+        case "join": {
+          if (!a.channel) return ["Which channel?", true];
+          const r = await discordVoiceChannels(a.server);
+          if (!r.ok) return [r.error, true];
+          const c = bestMatch(r.channels, a.channel, (x) => x.name);
+          if (!c) return ["No voice channel called " + a.channel + (a.server ? " in " + a.server : "") + ". Some there are: " + r.channels.slice(0, 15).map((x) => x.name + " (" + x.server + ")").join(", "), true];
+          const j = await discord.action("joinVoice", { channelId: c.id });
+          return j.ok ? ["Joined " + c.name + " in " + c.server + "."] : [j.error, true];
+        }
+        case "input_volume":
+        case "output_volume": {
+          if (a.level == null) return ["level needed", true];
+          const r = await discord.action("setVolumes", a.action === "input_volume" ? { input: a.level } : { output: a.level });
+          return r.ok ? ["Discord " + (a.action === "input_volume" ? "input" : "output") + " volume is " + (a.action === "input_volume" ? r.voice.inputVolume : r.voice.outputVolume) + "."] : [r.error, true];
+        }
+        case "user_volume":
+        case "user_mute": {
+          const f = discordMember(a.user);
+          if (f.error) return [f.error, true];
+          const args = { userId: f.member.id };
+          if (a.action === "user_volume") { if (a.level == null) return ["level needed", true]; args.volume = a.level; }
+          else args.mute = a.mute !== false;
+          const r = await discord.action("setUserVoice", args);
+          return r.ok ? [f.member.name + (a.action === "user_volume" ? " is at " + Math.max(0, Math.min(200, a.level)) + "%." : args.mute ? " is muted for you." : " is unmuted.")] : [r.error, true];
+        }
+        default: return ["unknown action", true];
+      }
     }
     case "notes": {
       const file = H.stateFile("notes.txt");
@@ -1117,21 +1382,31 @@ async function runServerTool(name, input, emit) {
       }
       return [text.trim() ? text.slice(-6000) : "(the notes are empty)"];
     }
-    case "pc_status": {
-      let s = await selfGet("/api/pcstats");
-      if (s.warming) { await new Promise((r) => setTimeout(r, 2600)); s = await selfGet("/api/pcstats"); }
-      return [JSON.stringify({
-        cpuPct: s.cpu && s.cpu.pct, cpuTempC: s.cpu && s.cpu.tempC, ram: s.ram,
-        gpu: s.gpu, netDownBps: s.net && s.net.downBps, netUpBps: s.net && s.net.upBps,
-        busiest: (s.busiest || []).slice(0, 5),
-      })];
+    case "info": {
+      const r = await info(String(a.about || "everything"));
+      return [JSON.stringify(r), !!(r && r.error)];
     }
     case "phone": {
-      const s = await selfGet("/api/phone");
-      return [JSON.stringify({
-        connected: s.connected, battery: s.battery,
-        notifications: (s.notifications || []).slice(0, 10).map((n) => ({ app: n.app, title: n.title, message: n.message, at: n.date })),
-      })];
+      const s = await selfJson("/api/phone");
+      if (!s || s.ok === false) return [(s && s.error) || "The phone bridge isn't running.", true];
+      if (a.action === "answer" || a.action === "decline" || a.action === "hang_up") {
+        if (!s.call) return ["There's no call right now.", true];
+        if (a.action === "answer" && s.call.accepted) return ["The call is already answered."];
+        const r = await selfJson("/api/phone", { action: { answer: "accept", decline: "decline", hang_up: "hangup" }[a.action], uid: s.call.uid });
+        return r.ok ? [{ answer: "Answered", decline: "Declined", hang_up: "Hung up on" }[a.action] + " the call from " + s.call.from + "."] : [r.error || "failed", true];
+      }
+      if (a.action === "clear") {
+        const r = await selfJson("/api/phone", { action: "clear" });
+        return r.ok ? ["Cleared the panel's notification list (the phone keeps its own)."] : [r.error || "failed", true];
+      }
+      if (a.action === "dismiss") {
+        const list = s.notifications || [];
+        const n = a.index != null ? list[a.index] : bestMatch(list, a.app, (x) => x.app + " " + (x.title || ""));
+        if (!n) return ["No notification like that on the panel.", true];
+        const r = await selfJson("/api/phone", { action: "dismiss", uid: n.uid });
+        return r.ok ? ["Dismissed " + n.app + (n.title ? ": " + n.title : "") + " from the panel."] : [r.error || "failed", true];
+      }
+      return ["unknown action", true];
     }
     default:
       return ["unknown tool " + name, true];
@@ -1167,6 +1442,8 @@ function systemPrompt(small) {
     "- Each request starts with a bracketed line of background (the time, what is playing). Use it when it helps; never remark on it otherwise.",
     "- Your memory is shared with " + who() + "'s other assistant. When they tell you something worth keeping, remember it; to look something up in it, recall.",
     "- To get a new AI model for the local server: find_model, then download_model with the best fit. The user confirms the download on screen.",
+    "- You run this dashboard app itself (panel): updates, forks, apps, widgets, scenes, themes, its settings. Only install_update or switch_fork when " + who() + " asks for it.",
+    "- For anything about the PC, the iPhone, Discord, sound devices, what is playing, Claude usage, the lights or the local models, read info first instead of guessing.",
   ];
   if (settings.about) parts.push("", "About " + who() + ":", settings.about);
   if (facts.length) parts.push("", "Things you have been asked to remember:", facts.map((f) => "- " + f.text).join("\n"));
@@ -1715,4 +1992,6 @@ function init(host) {
 module.exports = {
   init, handle,
   STATE_FILES: ["jarvis.json", "jarvis-memory.json", "jarvis-history.json"].concat(govee.STATE_FILES),
+  // For test harnesses: run one server-side tool as a model would.
+  runServerTool, TOOLS,
 };

@@ -216,6 +216,12 @@
     ringing: () => !!ring,
     stop: () => { if (ring) stopRing(false); },
   };
+  // Ask Jarvis something from anywhere on the page, or run one of his
+  // on-screen tools directly (what a test does).
+  window.y70Jarvis = {
+    ask: (text) => ask(String(text || "")),
+    runTool: (name, input) => runClientTool({ name, input: input || {} }),
+  };
 
   // ---------------------------------------------------------------- tick ----
   function tick() {
@@ -831,6 +837,12 @@
   // going by listening again; anything else lets the card fold away.
   function afterAnswer(interrupted) {
     if (J.ctl) return;               // the turn is still running
+    // A restart or reload the reply promised waits until it has been heard.
+    if (J.afterReply) {
+      const run = J.afterReply;
+      J.afterReply = null;
+      setTimeout(() => { try { run(); } catch (e) {} }, 400);
+    }
     setMode("idle");
     if (!interrupted && /\?\s*$/.test(J.reply.trim()) && JS && JS.speak) {
       setTimeout(() => { if (J.mode === "idle") startListening(true); }, 350);
@@ -880,7 +892,7 @@
   const TOOL_WORDS = {
     web_search: "Searching the web", read_page: "Reading", image_search: "Finding pictures",
     weather: "Checking the weather", volume: "Adjusting the volume", remember: "Remembering",
-    discord: "Talking to Discord", notes: "Opening your notes", pc_status: "Checking the PC", phone: "Checking your phone",
+    discord: "Talking to Discord", notes: "Opening your notes", phone: "Talking to your phone", info: "Checking",
     lights: "Changing the lights", recall: "Remembering", find_model: "Looking for models",
   };
 
@@ -1011,6 +1023,7 @@
         J.cards.push({ kind: "show", title: a.title, items: Array.isArray(a.items) ? a.items : [] });
         renderJarvis();
         return "It's on the screen.";
+      case "panel": return panelTool(a);
       case "open_app":
         if (!APPS[a.app]) return "There's no app called " + a.app + ".";
         setApp(a.app);
@@ -1021,6 +1034,152 @@
         return downloadTool(a);
       default:
         return "Unknown tool " + c.name;
+    }
+  }
+
+  // ------------------------------------------------------------- the app -----
+  // Jarvis drives the dashboard the way the drawer does: shell.js's own
+  // functions, and window.y70native (shell.js's `native`) for the parts only
+  // the installed app has — updates, forks, start-up, focus.
+  const pick = (list, q) => {
+    const n = String(q || "").toLowerCase().trim();
+    return n ? (list.find((x) => x.toLowerCase() === n) || list.find((x) => x.toLowerCase().startsWith(n)) || list.find((x) => x.toLowerCase().includes(n))) : null;
+  };
+  const updateWords = (u) => !u ? "unknown" : ({
+    idle: "not checked yet", checking: "checking", current: "up to date",
+    downloading: "downloading v" + (u.version || "?") + (u.percent ? " (" + u.percent + "%)" : ""),
+    ready: "v" + (u.version || "?") + " downloaded, waiting for a restart",
+    dev: "updates are off (this copy runs from source)", error: "the last check failed: " + (u.error || "unknown"),
+  }[u.status] || u.status);
+
+  async function panelTool(a) {
+    const nat = typeof native !== "undefined" ? native : null;
+    const NO_NATIVE = "That part only works in the installed app, not in a browser.";
+    const onOff = (v) => (v ? "on" : "off");
+    switch (a.action) {
+      case "status": {
+        const s = {
+          app: state.app, widgetsOpen: Object.keys(WIDGETS).filter((n) => state.widgets[n] && state.widgets[n].on),
+          scene: state.scene, theme: theme.name,
+          apps: Object.keys(APPS), widgets: Object.keys(WIDGETS), scenes: SCENES.map((x) => x.id), themes: Y70Theme.PRESETS.map((p) => p.name),
+        };
+        if (!nat) return JSON.stringify({ ...s, note: "running in a browser: no updates or native settings here" });
+        const q = (f) => Promise.resolve().then(f).catch(() => null);
+        const [v, u, f, kb, lock, auto, tb] = await Promise.all([
+          q(() => nat.version()), q(() => nat.updateState()), q(() => nat.forks && nat.forks()),
+          q(() => nat.getKeyboardMode()), q(() => nat.getPassiveLock()), q(() => nat.getAutoStart()), q(() => nat.getShowInTaskbar()),
+        ]);
+        return JSON.stringify({
+          ...s, version: v, update: updateWords(u),
+          fork: f ? { current: f.current, switchingTo: f.switchingTo || null, available: f.forks.map((x) => x.id + " (" + x.name + ")") } : null,
+          keyboardMode: kb, neverTakeFocus: lock, startWithWindows: auto, taskbarIcon: tb,
+        });
+      }
+      case "check_updates": {
+        if (!nat) return NO_NATIVE;
+        let u = await nat.checkUpdate();
+        paintUpdate(u);
+        // The check runs in the background; give it up to 20 s to say something.
+        for (let i = 0; i < 40 && u && (u.status === "checking" || u.status === "idle"); i++) {
+          await new Promise((r) => setTimeout(r, 500));
+          u = await nat.updateState();
+        }
+        paintUpdate(u);
+        const v = await nat.version().catch(() => "?");
+        return "This is v" + v + ". Update: " + updateWords(u) + "." + (u && u.status === "ready" ? " Say the word and I'll restart into it." : "");
+      }
+      case "install_update": {
+        if (!nat) return NO_NATIVE;
+        const u = await nat.updateState();
+        if (!u || u.status !== "ready") return "There's no downloaded update to install (" + updateWords(u) + ").";
+        // Restart once the reply has been spoken, not in the middle of it.
+        J.afterReply = () => nat.installUpdate();
+        return "Restarting into v" + (u.version || "?") + " as soon as you've heard this.";
+      }
+      case "switch_fork": {
+        if (!nat || !nat.forks) return NO_NATIVE;
+        const f = await nat.forks();
+        const target = f.forks.find((x) => x.id === a.fork || x.name.toLowerCase().includes(String(a.fork || a.name || "").toLowerCase()) && (a.fork || a.name));
+        if (!target) return "Forks: " + f.forks.map((x) => x.id + " = " + x.name).join(", ") + ". Which one?";
+        if (target.id === f.current) return "This already is " + target.name + ".";
+        if (!f.packaged) return "Forks only switch in the installed app.";
+        const r = await nat.switchFork(target.id);
+        if (r && r.ok === false) return "Couldn't switch: " + (r.error || "unknown");
+        if (r && r.forks) { forkInfo = r; paintForks(); }
+        return "Downloading " + target.name + "'s latest build. When it's ready, install_update restarts into it; settings and sign-ins carry over.";
+      }
+      case "cancel_fork_switch": {
+        if (!nat || !nat.cancelForkSwitch) return NO_NATIVE;
+        const r = await nat.cancelForkSwitch();
+        if (r && r.forks) { forkInfo = r; paintForks(); }
+        return "Fork switch cancelled.";
+      }
+      case "open": {
+        const name = pick(Object.keys(APPS), a.app || a.name);
+        if (!name) return "Apps: " + Object.keys(APPS).join(", ") + ".";
+        closeCard();
+        setApp(name);
+        return "Opened " + APPS[name].title + ".";
+      }
+      case "widget": {
+        const name = pick(Object.keys(WIDGETS), a.name) || Object.keys(WIDGETS).find((k) => WIDGETS[k].title.toLowerCase().includes(String(a.name || "").toLowerCase()) && a.name);
+        if (!name) return "Widgets: " + Object.keys(WIDGETS).join(", ") + ".";
+        const w = state.widgets[name] || (state.widgets[name] = { on: false, h: null, collapsed: false });
+        w.on = a.on == null ? !w.on : !!a.on;
+        if (w.on) w.collapsed = false;
+        save(); renderDock(); renderWidgetList();
+        return WIDGETS[name].title + " widget " + (w.on ? "shown" : "hidden") + ".";
+      }
+      case "scene": {
+        const sc = SCENES.find((x) => x.id === String(a.name || "").toLowerCase()) || SCENES.find((x) => x.name.toLowerCase().includes(String(a.name || "").toLowerCase()) && a.name);
+        if (!sc) return "Scenes: " + SCENES.map((x) => x.name).join(", ") + ".";
+        applyScene(sc.id);
+        return sc.name + " layout on.";
+      }
+      case "theme": {
+        const p = Y70Theme.PRESETS.find((x) => x.name.toLowerCase() === String(a.name || "").toLowerCase())
+          || Y70Theme.PRESETS.find((x) => x.name.toLowerCase().includes(String(a.name || "").toLowerCase()) && a.name);
+        if (!p) return "Themes: " + Y70Theme.PRESETS.map((x) => x.name).join(", ") + ".";
+        applyTheme({ ...Y70Theme.preset(p.id) });
+        return "Theme set to " + p.name + ".";
+      }
+      case "settings": {
+        const page = String(a.name || "drawer").toLowerCase();
+        closeCard();
+        if (/close|shut|hide/.test(page)) { openDrawer(false); return "Closed."; }
+        openDrawer(true);
+        if (/jarvis|assistant|voice/.test(page)) showJarvisView(true);
+        else if (/appear|theme|colou?r|look/.test(page)) showSettings(true);
+        return "Opened " + (/jarvis|assistant|voice/.test(page) ? "Jarvis's settings" : /appear|theme|colou?r|look/.test(page) ? "the appearance settings" : "the drawer") + ".";
+      }
+      case "reload": {
+        if (!nat) { J.afterReply = () => location.reload(); return "Reloading the panel."; }
+        J.afterReply = () => nat.reload();
+        return "Reloading the panel as soon as you've heard this.";
+      }
+      case "keyboard": {
+        if (!nat) return NO_NATIVE;
+        const on = await nat.setKeyboardMode(a.on !== false);
+        return "Keyboard mode " + onOff(on) + ".";
+      }
+      case "never_take_focus": {
+        if (!nat) return NO_NATIVE;
+        const on = await nat.setPassiveLock(a.on !== false);
+        const el = $("#passive-lock");
+        if (el) { el.textContent = "Never take focus: " + (on ? "ON" : "off"); el.classList.toggle("is-on", !!on); }
+        return "Never take focus is " + onOff(on) + ".";
+      }
+      case "start_with_windows":
+      case "taskbar_icon": {
+        if (!nat) return NO_NATIVE;
+        const auto = a.action === "start_with_windows";
+        const on = auto ? await nat.setAutoStart(a.on !== false) : await nat.setShowInTaskbar(a.on !== false);
+        const el = $(auto ? "#native-autostart" : "#native-taskbar");
+        const label = auto ? "Start with Windows" : "Taskbar icon";
+        if (el) { el.textContent = label + ": " + onOff(on); el.classList.toggle("is-on", !!on); }
+        return label + " is " + onOff(on) + ".";
+      }
+      default: return "Unknown panel action " + a.action + ".";
     }
   }
 
