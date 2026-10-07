@@ -1,6 +1,6 @@
 {
   "name": "y70-dashboard",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "private": true,
   "description": "Native shell for the HYTE Y70 Touch dashboard \u2014 Jarvis fork: a voice assistant on a window that never steals focus.",
   "author": "Cappy",
