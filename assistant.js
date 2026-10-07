@@ -1417,12 +1417,76 @@ async function runServerTool(name, input, emit) {
 function who() { return settings.name || "the user"; }
 
 // `small`: a small local model gets a shorter slice of the memory graph.
+// ------------------------------------------------------------ master prompt --
+// Jarvis is only as good as his habit of reaching for a tool. Small local
+// models especially will happily say "Checking for updates now." and stop, or
+// answer "no updates" from nowhere (both seen with the 9B). So the prompt
+// leads with the rules for tools, then says which tool answers what — built
+// from the tools this model actually has — then shows it done.
+const TOOL_GUIDE = {
+  info: "anything about the PC (CPU, GPU, temperatures, memory, network, what is running, uptime), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
+  panel: "this app: check for or install updates, switch forks, open an app (Spotify, YouTube, Web...), show or hide a widget, a layout (gaming, music...), a theme, your own settings, reload",
+  web_search: "news, scores, prices, release dates, facts, anything current or anything you are not certain of",
+  read_page: "summarise or read an article or a link (from search results or one the user gave)",
+  image_search: "\"show me\", \"what does it look like\"",
+  weather: "weather, rain, temperature, \"do I need a jacket\", any forecast",
+  music: "play something, pause, resume, skip, go back, \"what is this song\"",
+  volume: "louder, quieter, mute, switch speakers or headphones or microphone, one program's volume, the mic",
+  timer: "a countdown: \"in ten minutes\", \"timer for the pasta\"",
+  alarm: "a time of day: \"wake me at 7\", \"remind me at 3\"",
+  show: "lists, steps, recipes, comparisons, anything easier to read than to hear",
+  remember: "anything worth keeping: preferences, people, plans, \"remember that...\"",
+  recall: "\"what do you know about...\", details about a person or thing that are not already above",
+  find_model: "a new AI model for the local server (then download_model)",
+  download_model: "fetch the model find_model picked; the user confirms on screen",
+  open_web: "open a website on the panel",
+  lights: "the lights: on, off, colours, brightness, warm or cool white, scenes",
+  discord: "mute, unmute, deafen, join or leave a voice channel, Discord's volumes, someone's volume",
+  phone: "answer, decline or hang up a call; dismiss notifications",
+  notes: "the Notes widget: read it or add a line",
+};
+
+const TOOL_EXAMPLES = [
+  ["turn it down a bit", "volume {action: down}", "then say the new level it returned"],
+  ["is something hogging my GPU?", "info {about: pc}", "then answer from the GPU numbers and the busiest programs"],
+  ["any updates?", "panel {action: check_updates}", "then say exactly what it returned"],
+  ["lights blue and play some jazz", "lights {action: color, color: blue} and music {action: play, query: jazz}, both in one go", "then \"Blue, and jazz is on.\""],
+  ["who's talking?", "discord {action: status}", ""],
+  ["what happened with SpaceX today?", "web_search {query: SpaceX news today}", "then two sentences from the results"],
+  ["pasta timer, 12 minutes", "timer {action: set, seconds: 720, label: pasta}", ""],
+  ["how much have I spent on Claude today?", "info {about: claude_usage}", ""],
+  ["what's my phone at?", "info {about: phone}", "then the battery level it returned"],
+];
+
 function systemPrompt(small) {
-  const addr = settings.addressAs ? "Address them as \"" + settings.addressAs + "\"." : "";
+  const addr = settings.addressAs ? " Address them as \"" + settings.addressAs + "\"." : "";
   const facts = graphMode() ? [] : loadFacts();
   const graph = graphSummary();
+  const have = TOOLS.filter((t) => !small || t.core).map((t) => t.name);
+  const guide = have.filter((n) => TOOL_GUIDE[n]).map((n) => "- " + n + ": " + TOOL_GUIDE[n]);
+  const examples = TOOL_EXAMPLES
+    .filter(([, call]) => have.some((n) => call.startsWith(n + " ")))
+    .map(([said, call, then]) => "- \"" + said + "\" -> " + call + (then ? ", " + then : ""));
   const parts = [
-    "You are Jarvis, " + who() + "'s personal assistant. You live on the small HYTE Y70 Touch screen beside their main monitor, built into their dashboard. " + addr,
+    "You are Jarvis, " + who() + "'s personal assistant. You live on the small HYTE Y70 Touch screen beside their main monitor, built into their dashboard, and you can see and do almost everything on their PC through your tools." + addr,
+    "",
+    "THE RULE: you act through your tools. If a tool can do it or knows it, call the tool, every time, even if you called it a minute ago. You never pretend.",
+    "",
+    "Tools, always:",
+    "1. Do, then speak. Call the tool first and speak after its result. Never say you are doing, checking or have done something (\"I'll...\", \"Let me...\", \"Checking...\", \"Done\", \"Playing...\") unless a tool call in this turn did it.",
+    "2. Never answer from memory what a tool can read. The PC, the phone, Discord, sound, what is playing, this app, Claude usage, the lights, the weather, news and anything current all change; earlier results in this conversation are already stale, so read again.",
+    "3. Say what the tool returned, not what you expected. If it failed or found nothing, say so in a few words, with the fix if the tool gave one.",
+    "4. Several things asked, several tools: call them together in one step when they do not depend on each other.",
+    "5. Just do ordinary things; do not ask first. Ask only when a request is genuinely ambiguous. install_update, switch_fork and download_model only when " + who() + " asked for that.",
+    "6. Not sure? Read first (info, web_search) rather than guess. One search is usually enough, two at most; then answer from what you found, even if partial.",
+    "7. Chat, jokes, opinions and general knowledge (\"what is a GPU?\") need no tool: just answer. Never talk about your tools or what you lack.",
+    "8. If something needs doing and no tool can do it, say in a few words that you can't do that yet. Never fake it.",
+    "",
+    "Which tool:",
+    ...guide,
+    "",
+    "Like this (-> is the tool call):",
+    ...examples,
     "",
     "How you talk:",
     "- Your replies are spoken aloud, so keep them short: one to three sentences unless asked for more. No markdown, no lists, no emoji, never read out a URL.",
@@ -1430,20 +1494,11 @@ function systemPrompt(small) {
     "- When something is on screen (search results, pictures, weather, a show card), say one line about it instead of reading it out.",
     "- Fahrenheit, miles, and the 12-hour clock.",
     "",
-    "How you act:",
-    "- Use tools for anything that touches the world: music, volume, timers, alarms, weather, search, Discord, notes.",
-    "- For news, prices, scores, anything current or anything you are not sure of, search first and answer from what you found. Do not guess.",
-    "- One search is usually enough, two at most. Then answer from what you found, even if it is partial.",
-    "- To summarise an article or page, read_page it first. \"Show me\" means put it on screen.",
-    "- Just do things. Only ask when a request is genuinely ambiguous.",
-    "- If a tool fails, say so in a few words.",
+    "Good to know:",
     "- Requests come through speech recognition and may be misheard (\"place on low fi beads\" means \"play some lo-fi beats\"). Interpret them charitably.",
     "- " + who() + " may be in the middle of a game. Be brief.",
-    "- Each request starts with a bracketed line of background (the time, what is playing). Use it when it helps; never remark on it otherwise.",
+    "- Each request starts with a bracketed line of background (the time, what is playing, timers). Use it when it helps; never remark on it otherwise.",
     "- Your memory is shared with " + who() + "'s other assistant. When they tell you something worth keeping, remember it; to look something up in it, recall.",
-    "- To get a new AI model for the local server: find_model, then download_model with the best fit. The user confirms the download on screen.",
-    "- You run this dashboard app itself (panel): updates, forks, apps, widgets, scenes, themes, its settings. Only install_update or switch_fork when " + who() + " asks for it.",
-    "- For anything about the PC, the iPhone, Discord, sound devices, what is playing, Claude usage, the lights or the local models, read info first instead of guessing.",
   ];
   if (settings.about) parts.push("", "About " + who() + ":", settings.about);
   if (facts.length) parts.push("", "Things you have been asked to remember:", facts.map((f) => "- " + f.text).join("\n"));
@@ -1484,7 +1539,7 @@ async function claudeStep(conv, emit, signal, noTools) {
     max_tokens: 4096,
     system: [{ type: "text", text: systemPrompt(false), cache_control: { type: "ephemeral" } }],
     tools: claudeTools(),
-    messages: conv.messages,
+    messages: withNudge(conv.messages, conv.nudge),
   };
   // The history holds tool calls, so the tools must stay declared; "none"
   // just stops new ones.
@@ -1558,7 +1613,7 @@ async function localStep(conv, emit, signal, noTools) {
         model,
         stream: true,
         max_tokens: 1500,
-        messages: toOpenAI(systemPrompt(!big), conv.messages),
+        messages: toOpenAI(systemPrompt(!big), withNudge(conv.messages, conv.nudge)),
         tools: openaiTools(big),
         tool_choice: noTools ? "none" : "auto",
         chat_template_kwargs: { enable_thinking: false },
@@ -1592,6 +1647,9 @@ async function localStep(conv, emit, signal, noTools) {
       let j;
       try { j = JSON.parse(data); } catch (e) { continue; }
       if (j.error) throw new UserFacing("Local model error: " + (j.error.message || "unknown"));
+      // llama-server puts its own timings on the last chunk: how much of the
+      // prompt it had to read (vs reuse from cache) and how fast it wrote.
+      if (j.timings) emit({ type: "timings", prompt: j.timings.prompt_n, cached: j.timings.cache_n, promptMs: Math.round(j.timings.prompt_ms), genMs: Math.round(j.timings.predicted_ms), tokens: j.timings.predicted_n });
       const ch = j.choices && j.choices[0];
       if (!ch) continue;
       const d = ch.delta || {};
@@ -1663,12 +1721,76 @@ function addHistory(entry) {
 const MAX_STEPS = 6;
 const MAX_SEARCHES = 2;
 
+// ---- keeping him honest -------------------------------------------------------
+// Before any tool has run in a turn, a reply is not spoken straight away when
+// it claims an action ("Checking for updates now.", "Done.") or the request is
+// about something only a tool can know. If the step then ends without a tool
+// call, its text is dropped and the step runs again, once, with a reminder.
+const CLAIM = /^\W*(?:(?:ok(?:ay)?|sure|right|alright|got it|of course|certainly|no problem)\W+)?(?:i'?ll|i will|i'?m (?:going to|now|on it)|let me|on it|(?:checking|setting|turning|playing|opening|installing|restarting|reloading|switching|muting|unmuting|pausing|resuming|skipping|starting|looking|searching|dimming|changing|joining|leaving|answering|declining|updating|downloading)|i'?ve|i have|done|all set|(?:set|turned|muted|unmuted|paused|resumed|skipped|opened|installed|switched|started|joined|answered|declined|dimmed|changed|updated|downloaded|added|removed|saved|remembered))\b/i;
+const LIVE = /\b(updates?|version|cpu|gpu|vram|ram|temps?|temperatures?|hot|fps|battery|notifications?|texts?|messages?|calls?|calling|discord|channel|talking|volume|louder|quieter|mute|unmute|deafen|headphones?|headset|speakers?|mic|microphone|lights?|timers?|alarms?|weather|rain|forecast|play|pause|skip|song|playing|news|score|price|spent|usage|widgets?|theme|layout|scene|open|download|remember|weather)\b/i;
+// "What is a GPU?" is a question about the world, not about this PC.
+const KNOWLEDGE = /^\W*(?:(?:hey |ok |okay )?jarvis\W+)?(?:what(?:'s| is| are) (?:a|an|the difference)\b|what does .+ mean|define\b|explain\b|how (?:does|do) (?:a|an)\b|tell me (?:a joke|about (?:a|an)\b))/i;
+const NUDGE = "(Reminder from Jarvis's own system, not from " + "the user: you answered without calling a tool. If this request needs one, and anything about the PC, the phone, Discord, sound, this app, music, the lights, timers, alarms, the weather or anything current does, call the right tool now and answer from its result. Never say you did, are doing or checked something you did not. If it truly needs no tool, give your answer again.)";
+
+// The step's text, held back while it is still undecided whether it stands.
+function honestEmit(emit, hold) {
+  let buf = "", flushed = false, decided = !hold.claims && !hold.all;
+  return {
+    emit(ev) {
+      if (ev.type !== "text" || decided) return emit(ev);
+      buf += ev.delta;
+      if (hold.all) return;
+      // Only claims are watched: once the first sentence is in and is not one,
+      // let it all through.
+      const m = buf.match(/^[\s\S]*?[.!?](?:\s|$)/);
+      if (!m && buf.length < 140) return;
+      if (CLAIM.test((m ? m[0] : buf).trim())) { hold.all = true; return; }
+      decided = true; flushed = true;
+      emit({ type: "text", delta: buf }); buf = "";
+    },
+    text: () => buf,
+    // The step is over: a short reply never reached a sentence end, so judge
+    // what there is.
+    settle() { if (!decided && !hold.all && CLAIM.test(buf.trim())) hold.all = true; },
+    release() { if (buf) emit({ type: "text", delta: buf }); buf = ""; decided = true; flushed = true; },
+    get flushed() { return flushed; },
+  };
+}
+
+// The nudge rides on the latest user message for one step only; it is never
+// kept in the conversation.
+function withNudge(messages, nudge) {
+  if (!nudge) return messages;
+  const out = messages.slice();
+  const i = out.length - 1;
+  if (i < 0 || out[i].role !== "user") return messages;
+  const blocks = typeof out[i].content === "string" ? [{ type: "text", text: out[i].content }] : out[i].content;
+  out[i] = { role: "user", content: blocks.concat([{ type: "text", text: nudge }]) };
+  return out;
+}
+
 async function runLoop(conv, emit, signal) {
   for (let step = 0; step < MAX_STEPS; step++) {
     const provider = conv.provider;
     const last = step === MAX_STEPS - 1;
     emit({ type: "thinking", provider });
-    const r = provider === "claude" ? await claudeStep(conv, emit, signal, last) : await localStep(conv, emit, signal, last);
+    // Watch only before the first tool of the turn, and only once.
+    const watch = !last && !conv.nudged && conv.log.tools.length === 0;
+    const heard = conv.log.heard || "";
+    const hold = { claims: watch, all: watch && LIVE.test(heard) && !KNOWLEDGE.test(heard) };
+    const h = honestEmit(emit, hold);
+    const r = provider === "claude" ? await claudeStep(conv, h.emit, signal, last) : await localStep(conv, h.emit, signal, last);
+    const usedTool = r.content.some((b) => b.type === "tool_use");
+    h.settle();
+    if (watch && !usedTool && hold.all && !h.flushed && r.stop !== "refusal") {
+      // Claimed or answered without a tool: drop it, unheard, and try again.
+      conv.nudged = { said: h.text().trim().slice(0, 200) };
+      conv.nudge = NUDGE;
+      step--;
+      continue;
+    }
+    conv.nudge = null;
+    h.release();
     conv.model = r.model;
     // Claude rejects an assistant turn with no content, and a conversation can
     // move to Claude after the local model came back with nothing at all.
@@ -1726,6 +1848,8 @@ function finish(conv, emit) {
   addHistory({
     at: Date.now(), conv: conv.id, heard: conv.log.heard, reply: conv.log.reply.trim(),
     provider: conv.provider, model: conv.model || null, tools: conv.log.tools,
+    // What he first said instead of using a tool, when the reminder caught it.
+    ...(conv.nudged ? { caught: conv.nudged.said } : {}),
   });
   emit({ type: "done", conv: conv.id });
 }
@@ -1764,6 +1888,7 @@ async function handleTurn(req, res) {
         conv.provider = await chooseProvider();
         conv.log = { heard: text, reply: "", tools: [] };
         conv.searches = 0;
+        conv.nudged = null; conv.nudge = null;
         conv.messages.push({ role: "user", content: [{ type: "text", text: contextLine(body.context) + "\n" + text }] });
         emit({ type: "start", conv: conv.id, provider: conv.provider, model: conv.provider === "claude" ? settings.claudeModel : localModelNow() });
       }

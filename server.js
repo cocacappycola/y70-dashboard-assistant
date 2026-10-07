@@ -786,6 +786,9 @@ const phone = {
 function phoneStart() {
   if (phone.proc) return;
   if (process.platform !== "win32") { phone.err = "Windows only."; return; }
+  // A second copy of the dashboard (a test server beside the installed app)
+  // must not open a second Bluetooth link to the same iPhone.
+  if (process.env.Y70_NO_PHONE) { phone.err = "The iPhone bridge is off in this copy (Y70_NO_PHONE)."; return; }
   if (!fs.existsSync(ANCS_EXE)) {
     phone.err = "The iPhone bridge is not built yet (ancs/bin/out/y70-ancs.exe).";
     return;

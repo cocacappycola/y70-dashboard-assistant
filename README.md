@@ -139,7 +139,16 @@ box to type into instead.
   showing cards, and `panel` — the app itself: updates, forks, apps, widgets,
   scenes, themes, settings) are handed to the panel, which runs them with the
   shell's own functions and `window.y70native`, and posts the results back. A
-  restart or reload he promises waits until the reply has been heard. Small
+  restart or reload he promises waits until the reply has been heard.
+  **The master prompt** leads with the rules for tools (do, then speak; never
+  answer from memory what a tool can read; say what the tool returned; several
+  asks, several tools at once), then a *which tool answers what* guide and
+  worked examples — both built from the tools that model actually has. **The
+  honesty check** backs it up: until a tool has run in a turn, a reply that
+  claims an action ("Checking for updates now.", "Done.") or answers a question
+  only a tool can answer is held back unspoken; if the step ends without a tool
+  call it is dropped and run again once with a reminder (the history records
+  what was caught). Small
   local models get every tool but the notes, each a single tool with an
   `action`, so the list stays short enough to choose from well. Two web searches per
   question at most, and the last step runs with tools off, so every turn ends
