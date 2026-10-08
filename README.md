@@ -90,6 +90,16 @@ box to type into instead.
    Jarvis listens on Windows' **default recording device**; Settings → Jarvis →
    Microphone shows which one that is, with a live meter.
    
+   **Wait before answering** (Settings → Jarvis → Listening, 0.5–4 s, default
+   1.5) is the quiet that means "finished". Windows' dictation ends one
+   recognition at the end of a phrase whatever its timeout says (measured: two
+   sentences 2.5 s apart stopped after the first even with the timeout at
+   2.5 s), so the helper recognises phrase after phrase and the pause is judged
+   on the audio's own clock; the phrases' audio is joined (a short breath
+   between) and Whisper hears it as one request. After "Jarvis, …" in one
+   breath he keeps listening for the same pause, so a second sentence joins
+   the first.
+
    **Interrupting.** While he talks the mic keeps listening: "Jarvis…" starts a
    new request and "stop" / "that's enough" / "never mind" ends the answer. The
    helper is told the sentence he is saying, so his own voice through speakers

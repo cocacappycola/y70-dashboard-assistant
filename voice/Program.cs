@@ -114,8 +114,11 @@ internal static class Program
                 break;
             case "listen":
                 // audio:true = record for Whisper (SAPI segments, no online).
+                // endSilence: the pause that means "finished" (the user's
+                // setting); initialSilence: how long to wait for speech at all.
                 var withAudio = Bool(m, "audio", false);
-                _ = Listen(!withAudio && Bool(m, "online", true), Int(m, "maxSeconds", 20), withAudio);
+                _ = Listen(!withAudio && Bool(m, "online", true), Int(m, "maxSeconds", 20), withAudio,
+                    Math.Clamp(Dbl(m, "endSilence", 1.0), 0.3, 6.0), Math.Clamp(Dbl(m, "initialSilence", 6.0), 0.5, 10.0));
                 break;
             case "cancel":
                 try { _listenCts?.Cancel(); } catch { }
@@ -144,12 +147,12 @@ internal static class Program
                 _ = TestWake(Str(m, "path"), Bool(m, "speaking", false), Str(m, "speakingText"));
                 break;
             case "test-dictate":
-                _ = TestDictate(Str(m, "path"));
+                _ = TestDictate(Str(m, "path"), Math.Clamp(Dbl(m, "endSilence", 1.0), 0.3, 6.0));
                 break;
             // A whole request heard from a WAV file, through the same events a
             // real one sends (listening, partial, final with audio).
             case "test-listen":
-                _ = TestListen(Str(m, "path"));
+                _ = TestListen(Str(m, "path"), Math.Clamp(Dbl(m, "endSilence", 1.0), 0.3, 6.0));
                 break;
             case "tts-file":
                 _ = TtsToFile(Str(m, "text"), Str(m, "path"), Str(m, "voice"));
@@ -316,7 +319,7 @@ internal static class Program
     }
 
     // ========================================================= requests ====
-    static async Task Listen(bool online, int maxSeconds, bool withAudio)
+    static async Task Listen(bool online, int maxSeconds, bool withAudio, double endSilence, double initialSilence)
     {
         if (_listening) return;
         _listening = true;
@@ -329,7 +332,7 @@ internal static class Program
             if (online)
             {
                 Emit(new { type = "listening", engine = "online" });
-                var r = await ListenOnline(ct);
+                var r = await ListenOnline(ct, endSilence, initialSilence);
                 if (r.ok) { text = r.text; engine = "online"; }
                 else if (r.privacy)
                 {
@@ -343,7 +346,7 @@ internal static class Program
             if (!online && !ct.IsCancellationRequested)
             {
                 Emit(new { type = "listening", engine = withAudio ? "whisper" : "offline" });
-                var r = await ListenOffline(ct, null);
+                var r = await ListenOffline(ct, null, endSilence, initialSilence);
                 text = r.text;
                 if (withAudio) audio = r.audio;
                 engine = withAudio ? "whisper" : "offline";
@@ -358,7 +361,7 @@ internal static class Program
         }
     }
 
-    static async Task<(bool ok, string text, bool privacy, string error)> ListenOnline(CancellationToken ct)
+    static async Task<(bool ok, string text, bool privacy, string error)> ListenOnline(CancellationToken ct, double endSilence, double initialSilence)
     {
         try
         {
@@ -372,11 +375,12 @@ internal static class Program
                     rec.Dispose();
                     return (false, null, false, "compile " + compiled.Status);
                 }
-                rec.Timeouts.InitialSilenceTimeout = TimeSpan.FromSeconds(6);
-                rec.Timeouts.EndSilenceTimeout = TimeSpan.FromSeconds(0.9);
                 rec.HypothesisGenerated += (_, e) => Emit(new { type = "partial", text = e.Hypothesis.Text });
                 _online = rec;
             }
+            // Per request: the recognizer is kept, the user's pause setting may change.
+            _online.Timeouts.InitialSilenceTimeout = TimeSpan.FromSeconds(initialSilence);
+            _online.Timeouts.EndSilenceTimeout = TimeSpan.FromSeconds(endSilence);
             var res = await _online.RecognizeAsync().AsTask(ct);
             if (res.Status == WinSR.SpeechRecognitionResultStatus.Success) return (true, res.Text, false, null);
             return (false, null, false, res.Status.ToString());
@@ -399,23 +403,42 @@ internal static class Program
     // SAPI dictation, from the microphone or (for tests) a WAV file. Returns
     // the words SAPI heard and the audio it heard them in (WAV, base64): with
     // Whisper on, SAPI is only the ears that know when you have finished.
-    static async Task<(string text, string audio)> ListenOffline(CancellationToken ct, string wavPath)
+    // A request is every phrase until a pause of endSilence (the user's
+    // setting). SAPI dictation ends a single recognition at the end of a
+    // phrase whatever EndSilenceTimeout says (measured: with it at 2.5 s, two
+    // sentences 1.6 s apart still stopped after the first), so it runs in
+    // Multiple mode and the pause is judged here, in audio time — which makes
+    // a WAV test behave like the microphone.
+    static async Task<(string text, string audio)> ListenOffline(CancellationToken ct, string wavPath, double endSilence, double initialSilence)
     {
-        var done = new TaskCompletionSource<(string, string)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var eng = new Sapi.SpeechRecognitionEngine(EnUs);
         eng.LoadGrammar(new Sapi.DictationGrammar());
         if (wavPath != null) eng.SetInputToWaveFile(wavPath); else eng.SetInputToDefaultAudioDevice();
-        eng.InitialSilenceTimeout = TimeSpan.FromSeconds(6);
-        // A beat longer than SAPI's own default, so a breath mid-sentence does
-        // not end the request.
-        eng.EndSilenceTimeout = TimeSpan.FromSeconds(1.0);
-        eng.BabbleTimeout = TimeSpan.FromSeconds(4);
-        // A rejected utterance (too unsure to name) still has its audio, which
+        // Each phrase closes quickly; whether the request goes on is decided below.
+        eng.EndSilenceTimeout = TimeSpan.FromSeconds(0.5);
+        eng.EndSilenceTimeoutAmbiguous = TimeSpan.FromSeconds(0.5);
+        var parts = new List<Sapi.RecognitionResult>();
+        var gate = new object();
+        bool inSpeech = false;
+        var lastEnd = TimeSpan.Zero;
+        // A rejected phrase (too unsure to name) still has its audio, which
         // Whisper may well make sense of.
-        Sapi.RecognitionResult heard = null;
-        eng.SpeechRecognized += (_, e) => heard = e.Result;
-        eng.SpeechRecognitionRejected += (_, e) => { if (heard == null) heard = e.Result; };
-        eng.SpeechHypothesized += (_, e) => Emit(new { type = "partial", text = e.Result.Text });
+        void Add(Sapi.RecognitionResult r)
+        {
+            if (r?.Audio == null) return;
+            lock (gate) { parts.Add(r); lastEnd = r.Audio.AudioPosition + r.Audio.Duration; inSpeech = false; }
+        }
+        _lastDetected = new();
+        eng.SpeechDetected += (_, e) => { lock (gate) { inSpeech = true; _lastDetected.Add(Math.Round(e.AudioPosition.TotalSeconds, 2)); } };
+        eng.SpeechRecognized += (_, e) => Add(e.Result);
+        eng.SpeechRecognitionRejected += (_, e) => Add(e.Result);
+        eng.SpeechHypothesized += (_, e) =>
+        {
+            string before;
+            lock (gate) before = string.Join(" ", parts.Select(p => p.Text).Where(t => !string.IsNullOrWhiteSpace(t)));
+            Emit(new { type = "partial", text = (before + " " + e.Result.Text).Trim() });
+        };
         var lastLevel = 0L;
         eng.AudioLevelUpdated += (_, e) =>
         {
@@ -424,14 +447,107 @@ internal static class Program
             lastLevel = now;
             Emit(new { type = "level", v = e.AudioLevel });
         };
-        eng.RecognizeCompleted += (_, e) =>
+        eng.RecognizeCompleted += (_, _) => done.TrySetResult(true);    // a WAV ran out, or cancelled
+        eng.RecognizeAsync(Sapi.RecognizeMode.Multiple);
+
+        using (ct.Register(() => done.TrySetResult(true)))
         {
-            var r = e.Result ?? heard;
-            done.TrySetResult((e.Result?.Text, WavBase64(r?.Audio)));
-        };
-        eng.RecognizeAsync(Sapi.RecognizeMode.Single);
-        using (ct.Register(() => { try { eng.RecognizeAsyncCancel(); } catch { } }))
-            return await done.Task;
+            while (!done.Task.IsCompleted)
+            {
+                await Task.WhenAny(done.Task, Task.Delay(100));
+                TimeSpan pos;
+                try { pos = eng.AudioPosition; } catch { break; }
+                lock (gate)
+                {
+                    if (inSpeech) continue;
+                    if (parts.Count == 0) { if (pos.TotalSeconds >= initialSilence) break; }
+                    else if ((pos - lastEnd).TotalSeconds >= endSilence) break;
+                }
+            }
+        }
+        try { eng.RecognizeAsyncCancel(); } catch { }
+        await Task.WhenAny(done.Task, Task.Delay(1500));
+
+        List<Sapi.RecognitionResult> keep;
+        lock (gate) keep = PartsUntilGap(parts, endSilence);
+        if (keep.Count == 0) return (null, null);
+        var text = string.Join(" ", keep.Select(p => p.Text).Where(t => !string.IsNullOrWhiteSpace(t)));
+        return (text, JoinWav(keep));
+    }
+
+    // The phrases of one request: in order, up to the first pause of endSilence.
+    static List<double> _lastGaps = new();     // for the tests: the pauses measured
+    static List<double> _lastDetected = new();
+    static List<string> _lastSpans = new();
+    static List<Sapi.RecognitionResult> PartsUntilGap(List<Sapi.RecognitionResult> parts, double endSilence)
+    {
+        var sorted = parts.OrderBy(p => p.Audio.AudioPosition).ToList();
+        var keep = new List<Sapi.RecognitionResult>();
+        _lastGaps = new();
+        _lastSpans = sorted.Select(p => p.Audio.AudioPosition.TotalSeconds.ToString("0.00") + "-" + (p.Audio.AudioPosition + p.Audio.Duration).TotalSeconds.ToString("0.00")).ToList();
+        for (var i = 1; i < sorted.Count; i++)
+            _lastGaps.Add(Math.Round((sorted[i].Audio.AudioPosition - (sorted[i - 1].Audio.AudioPosition + sorted[i - 1].Audio.Duration)).TotalSeconds, 2));
+        foreach (var p in sorted)
+        {
+            if (keep.Count > 0)
+            {
+                var prev = keep[^1];
+                var gap = p.Audio.AudioPosition - (prev.Audio.AudioPosition + prev.Audio.Duration);
+                if (gap.TotalSeconds >= endSilence) break;
+            }
+            keep.Add(p);
+        }
+        return keep;
+    }
+
+    // The phrases' audio as one WAV (base64) for Whisper, a short breath
+    // between them. All of it is the same 16 kHz mono 16-bit SAPI format.
+    static string JoinWav(List<Sapi.RecognitionResult> parts)
+    {
+        try
+        {
+            byte[] fmt = null;
+            using var pcm = new MemoryStream();
+            foreach (var p in parts)
+            {
+                using var ms = new MemoryStream();
+                p.Audio.WriteToWaveStream(ms);
+                var (f, data) = WavChunks(ms.ToArray());
+                if (f == null || data == null) continue;
+                if (fmt == null) fmt = f;
+                else
+                {
+                    var rate = BitConverter.ToInt32(fmt, 4); var block = BitConverter.ToInt16(fmt, 12);
+                    pcm.Write(new byte[(int)(rate * 0.25) * block]);
+                }
+                pcm.Write(data);
+            }
+            if (fmt == null) return null;
+            using var outMs = new MemoryStream();
+            using var w = new BinaryWriter(outMs);
+            var body = pcm.ToArray();
+            w.Write(Encoding.ASCII.GetBytes("RIFF")); w.Write(4 + 8 + fmt.Length + 8 + body.Length); w.Write(Encoding.ASCII.GetBytes("WAVE"));
+            w.Write(Encoding.ASCII.GetBytes("fmt ")); w.Write(fmt.Length); w.Write(fmt);
+            w.Write(Encoding.ASCII.GetBytes("data")); w.Write(body.Length); w.Write(body);
+            w.Flush();
+            return Convert.ToBase64String(outMs.ToArray());
+        }
+        catch { return parts.Count > 0 ? WavBase64(parts[0].Audio) : null; }
+    }
+    static (byte[] fmt, byte[] data) WavChunks(byte[] b)
+    {
+        byte[] fmt = null, data = null;
+        var o = 12;
+        while (o + 8 <= b.Length)
+        {
+            var id = Encoding.ASCII.GetString(b, o, 4);
+            var size = BitConverter.ToInt32(b, o + 4);
+            if (size < 0 || o + 8 + size > b.Length) size = b.Length - o - 8;
+            if (id == "fmt ") fmt = b.AsSpan(o + 8, size).ToArray();
+            if (id == "data") data = b.AsSpan(o + 8, size).ToArray();
+            o += 8 + size + (size & 1);
+        }
+        return (fmt, data);
     }
 
     // ============================================================ voice ====
@@ -568,17 +684,17 @@ internal static class Program
         Emit(new { type = "test-done", what = "wake", path, speaking });
     }
 
-    static async Task TestListen(string path)
+    static async Task TestListen(string path, double endSilence)
     {
         Emit(new { type = "listening", engine = "whisper" });
-        var (text, audio) = await ListenOffline(CancellationToken.None, path);
+        var (text, audio) = await ListenOffline(CancellationToken.None, path, endSilence, 6.0);
         Emit(new { type = "final", text = text ?? "", engine = "whisper", audio, reason = (string)null });
     }
 
-    static async Task TestDictate(string path)
+    static async Task TestDictate(string path, double endSilence)
     {
-        var (text, audio) = await ListenOffline(CancellationToken.None, path);
-        Emit(new { type = "test-done", what = "dictate", path, text, audioBytes = audio == null ? 0 : audio.Length * 3 / 4, audio });
+        var (text, audio) = await ListenOffline(CancellationToken.None, path, endSilence, 6.0);
+        Emit(new { type = "test-done", what = "dictate", path, endSilence, text, gaps = _lastGaps, detected = _lastDetected, spans = _lastSpans, audioBytes = audio == null ? 0 : audio.Length * 3 / 4, audio });
     }
 
     static async Task TtsToFile(string text, string path, string voice)

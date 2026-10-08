@@ -52,6 +52,7 @@ const DEFAULTS = {
   stt: "",                          // whisper | online | offline; "" = from onlineSpeech
   whisperDir: "",                   // whisper.cpp: Release\whisper-server.exe + a ggml model
   whisperGpu: true,
+  endSilence: 1.5,                  // seconds of quiet that mean "I've finished" (0.5-4)
   stopWords: true,                  // "stop" / "Jarvis..." cut him off while he talks
   bargeIn: false,                   // just talking over him interrupts (headphones)
   speak: true,
@@ -87,6 +88,7 @@ function saveSettings(patch) {
   if (!CLAUDE_MODELS.includes(next.claudeModel)) next.claudeModel = DEFAULTS.claudeModel;
   if (!/^[\w.\-]{1,64}$/.test(String(next.localModel || ""))) next.localModel = DEFAULTS.localModel;
   next.sensitivity = Math.max(0, Math.min(1, Number(next.sensitivity) || 0.5));
+  next.endSilence = Math.round(Math.max(0.5, Math.min(4, Number(next.endSilence) || 1.5)) * 4) / 4;
   next.rate = Math.max(0.6, Math.min(2, Number(next.rate) || 1));
   next.wakePhrase = String(next.wakePhrase || "jarvis").trim().toLowerCase().slice(0, 30) || "jarvis";
   for (const k of ["name", "addressAs", "voice", "localBat", "graphFile", "localUrl", "memoryUrl", "whisperDir", "kokoroDir"]) next[k] = String(next[k] || "").slice(0, 400);
@@ -318,6 +320,10 @@ function onVoice(m) {
     case "final":
       voice.listening = false;
       if (m.engine === "online") voice.onlineBlocked = false;
+      // The rest of a one-breath request: join it to what came first.
+      m.prefix = voice.prefix || null;
+      voice.prefix = null;
+      if (m.prefix && !m.audio) m.text = joinHeard(m.prefix, m.text);
       // Whisper's words replace SAPI's, a beat later. SAPI's stand if Whisper
       // is unavailable.
       if (m.audio) {
@@ -353,8 +359,10 @@ async function transcribeFinal(m, audio) {
   const t = await transcribe(audio);
   if (t !== null) { m.sapi = m.text; m.text = t; m.engine = "whisper"; }
   else m.engine = "offline";
+  if (m.prefix) m.text = joinHeard(m.prefix, m.text);
   broadcast(m);
 }
+const joinHeard = (a, b) => [String(a || "").trim(), String(b || "").trim()].filter(Boolean).join(" ");
 
 // "Jarvis, set a timer" in one breath: Whisper re-hears the whole utterance and
 // the name comes off the front. If Whisper only hears the name, the panel
@@ -2163,7 +2171,16 @@ async function handle(req, res, urlPath) {
     return H.readJsonBody(req, res, (body) => {
       if (!voiceStart() || !voice.ready) return json(res, 503, { ok: false, error: voice.err || "The voice helper is starting." });
       const engine = sttEngine();
-      voiceSend({ cmd: "listen", online: engine === "online", audio: engine === "whisper", maxSeconds: 20 });
+      const endSilence = Math.max(0.5, Math.min(4, Number(settings.endSilence) || 1.5));
+      // prefix: the start of a request already heard ("Jarvis, what's the
+      // weather" in one breath). This listen catches anything said after it,
+      // waiting only as long as the user's pause setting, and the two are
+      // joined when it ends.
+      voice.prefix = body.prefix ? String(body.prefix).trim() : null;
+      voiceSend({
+        cmd: "listen", online: engine === "online", audio: engine === "whisper", maxSeconds: 45,
+        endSilence, initialSilence: voice.prefix ? endSilence : 6,
+      });
       return json(res, 200, { ok: true, engine });
     });
   }

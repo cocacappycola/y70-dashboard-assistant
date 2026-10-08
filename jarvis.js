@@ -894,7 +894,21 @@
   }
 
   // --------------------------------------------------------- listening ------
+  // The rest of a request whose start was heard with the wake word. If nothing
+  // more comes within the pause setting, the start alone is the request.
+  async function continueListening(start) {
+    speech.reset();
+    if (J.ctl) { J.ctl.abort(); J.ctl = null; }
+    J.reply = ""; J.cards = []; cardsSig = "";
+    J.heard = start; J.prefix = start; J.status = ""; J.note = "";
+    openCard();
+    setMode("listening");
+    const r = await post("listen", { prefix: start });
+    if (!r.ok) { J.prefix = null; ask(start); }
+  }
+
   async function startListening(followUp) {
+    J.prefix = null;
     speech.reset();
     if (J.ctl) { J.ctl.abort(); J.ctl = null; }
     if (!followUp) { J.reply = ""; J.cards = []; cardsSig = ""; }
@@ -1698,7 +1712,9 @@
         if (native && native.raise) native.raise().catch(() => {});
         if (ring) { stopRing(ring.kind === "alarm"); return; }      // "Jarvis" silences a ringing alarm (snoozes it)
         if (J.mode === "speaking") speech.reset();
-        if (ev.tail && ev.tail.split(/\s+/).length >= 2) { chime.listen(); ask(ev.tail); }
+        // "Jarvis, what's the weather" in one breath: keep listening for the
+        // pause setting, so "...and set a timer" joins it rather than being lost.
+        if (ev.tail && ev.tail.split(/\s+/).length >= 2) { chime.listen(); continueListening(ev.tail); }
         else startListening();
         return;
       case "listening":
@@ -1709,7 +1725,7 @@
         return;
       case "partial":
         if (J.mode !== "listening") return;
-        J.heard = ev.text;
+        J.heard = J.prefix ? J.prefix + " " + ev.text : ev.text;
         renderJarvis();
         return;
       case "level":
@@ -1717,6 +1733,7 @@
         return;
       case "final":
         if (J.mode !== "listening") return;
+        J.prefix = null;
         if (ev.text && ev.text.trim()) ask(ev.text.trim());
         else {
           J.heard = "";
@@ -2007,6 +2024,22 @@
     sens.appendChild(r1);
     sens.appendChild(el("span", null, "Hears it more easily"));
     f.appendChild(sens);
+    // How long a pause means "finished". Short answers faster; long lets you
+    // ask several things, sentence after sentence.
+    const es = Number(JS.endSilence) || 1.5;
+    const esHint = el("div", "set-hint", "");
+    const paintEs = (v) => { esHint.textContent = "Wait before answering: " + v.toFixed(2).replace(/0$/, "") + " s of quiet after you stop talking" + (v >= 2 ? " · room for several sentences" : v <= 0.75 ? " · snappy, one sentence" : ""); };
+    paintEs(es);
+    f.appendChild(esHint);
+    const wait = el("div", "jf-slider");
+    wait.appendChild(el("span", null, "Answer sooner"));
+    const esRange = el("input", "ui-range");
+    esRange.type = "range"; esRange.min = "0.5"; esRange.max = "4"; esRange.step = "0.25"; esRange.value = es;
+    esRange.addEventListener("input", () => paintEs(Number(esRange.value)));
+    esRange.addEventListener("change", () => saveSetting({ endSilence: Number(esRange.value) }));
+    wait.appendChild(esRange);
+    wait.appendChild(el("span", null, "Let me keep talking"));
+    f.appendChild(wait);
     // Who turns your words into text. The wake word is always Windows', offline.
     const wh = st.whisper || {};
     const curStt = JS.stt || (JS.onlineSpeech ? "online" : "offline");
