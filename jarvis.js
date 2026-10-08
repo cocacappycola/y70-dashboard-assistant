@@ -674,6 +674,18 @@
   }
   function cardNode(c) {
     const box = el("div", "jc");
+    if (c.kind === "look") {
+      // The full answer lives in the Chat app; the island shows what he saw.
+      box.appendChild(el("div", "jc-title", "Looked at · " + (c.title || "the screen")));
+      const row = el("div", "jc-row");
+      if (c.images && c.images[0]) row.appendChild(imgEl(c.images[0], "screenshot"));
+      const col = el("div");
+      col.appendChild(el("div", "s", c.answer ? "The full answer is in Chat." : (c.error || "")));
+      row.appendChild(col);
+      row.addEventListener("pointerup", () => { closeCard(); setApp("chat"); });
+      box.appendChild(row);
+      return box;
+    }
     if (c.kind === "results") {
       box.appendChild(el("div", "jc-title", "Results · " + c.query));
       for (const r of (c.items || []).slice(0, 5)) {
@@ -989,7 +1001,11 @@
             case "tool":
               J.status = ev.status === "running" ? (TOOL_WORDS[ev.name] || ev.name) + "…" : "";
               break;
-            case "card": J.cards.push(ev.card); break;
+            case "card":
+              J.cards.push(ev.card);
+              // He looked at the screen: the Chat app comes up with the full answer.
+              if (ev.card.kind === "look") J.openChat = true;
+              break;
             case "client": clientCalls = ev.calls; break;
             case "memory": if (jarvisViewOpen()) loadFacts(); break;
             case "notes": showNotes(ev.flash); break;
@@ -1022,6 +1038,12 @@
     J.status = "";
     J.convAt = Date.now();
     renderJarvis();
+    // After a look: the conversation, screenshot and full answer, on screen.
+    // (He keeps talking; the island card folds so the native views stay up.)
+    if (J.openChat) {
+      J.openChat = false;
+      if (APPS.chat) { setApp("chat"); setTimeout(closeCard, 1500); }
+    }
     // Silent replies get a small chime so you know the answer is there.
     if ((!JS || !JS.speak) && J.reply.trim()) chime.done();
     speech.end();
@@ -1301,6 +1323,7 @@
     "app:tiktok": "TikTok, a feed with auto-scroll",
     "app:snapchat": "Snapchat for web",
     "app:web": "any web page (open_web)",
+    "app:chat": "the conversation with Jarvis: questions, answers, the screenshots he looked at; opens by itself after a look",
   };
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 

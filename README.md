@@ -33,6 +33,7 @@ answers out loud, puts anything worth seeing on the panel, and can do things:
 | "Put 1847 times 23 on the calculator" / "pin Discord to the panel" | Drives the widgets themselves |
 | "At 10 tonight dim the lights to 20%" / "in 30 minutes turn off the lights" / "when my 7am alarm goes off, give me the weather" | Schedules any tool: alarms and timers carry actions (tool calls) and/or a prompt Jarvis carries out then; silent ones just do the work |
 | "Screensaver" / "screensaver off" / "next wallpaper" / "pause the wallpaper" | Starts Wallpaper Engine's screensaver on both screens; saying "Jarvis" brings the panel back over it while the main monitor stays in screensaver. Wallpaper Engine through its CLI |
+| "What am I looking at?" / "answer these questions" / "what does this error mean?" | Looks at the window in front (or the whole main screen), answers in a sentence, and opens the **Chat** app with the screenshot and the full answer |
 | "Ember theme" / "open your settings" | Themes, its settings and start-up options |
 | "Remember that…" | Shared memory |
 | "Lights purple" / "lights off" / "dim the lights to 30" | Your Govee strip: over the LAN when it has LAN control, Govee's cloud when it is Wi-Fi only |
@@ -160,6 +161,31 @@ Electron's `removeInsertedCSS` does not undo a stylesheet here (measured), so
 the rules only apply while `<html data-y70-theater>` is set and on/off flips
 the attribute; the CSS goes back in after every full page load. YouTube
 search is key-less: the results page's `ytInitialData`.
+
+### Looking at the screen, and the Chat app
+
+**look** (only when asked about the screen): the voice helper captures the
+window in front — or the whole monitor it's on; the panel's own window, the
+desktop and the taskbar count as "the screen" — with GDI and Windows' own
+JPEG encoder (`voice/Capture.cs`, no packages). A very wide shot (the 32:9
+main monitor) goes as near-16:9 tiles so text stays readable at 1568 px.
+Measured: 70–100 ms a capture. A model with eyes reads it: Claude with a key,
+otherwise the local model whose `jarvis-models.ini` entry has an `mmproj`
+(the vision add-on; the 9B and 4B have `Qwen3.5-*-mmproj-F16.gguf`), the
+loaded one when it can see so nothing swaps. Measured on the 4B: a 1568x843
+window read in 0.6 s, answered in 1.2 s — when pinned to the RTX card
+(`-dev Vulkan0`, as the router is; unpinned it took 21 s). The router reads
+the ini when it starts, so after adding an mmproj restart it (Settings →
+Jarvis → Local model → Restart). Exclusive-fullscreen games can capture
+black; borderless is fine.
+
+**Chat** (an app like Spotify): the conversation — your words, his answers,
+what he looked at (screenshot, tap to enlarge, and the full written answer),
+what he found — live as it happens, with a box to type to him. It opens by
+itself after a look; he says the gist out loud. The log is
+`jarvis-chat.json` (last 200 exchanges) and the screenshots `captures/` (last
+40), both in the data folder, never served except through
+`/api/jarvis/capture/...` on 127.0.0.1. Clear (tap twice) deletes both.
 
 ### Schedules, the screensaver, Wallpaper Engine
 

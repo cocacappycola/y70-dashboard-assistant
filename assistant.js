@@ -138,7 +138,7 @@ const voice = {
   voices: [], offline: false,
   onlineBlocked: false,            // Windows refused online speech (privacy switch)
   listening: false, engine: null,
-  seq: 0, ttsWaiters: new Map(),
+  seq: 0, ttsWaiters: new Map(), capWaiters: new Map(),
 };
 const game = { on: false, exe: null };
 
@@ -312,6 +312,11 @@ function onVoice(m) {
     case "tts": {
       const w = voice.ttsWaiters.get(m.id);
       if (w) { voice.ttsWaiters.delete(m.id); w(m); }
+      return;
+    }
+    case "capture": {
+      const w = voice.capWaiters.get(m.id);
+      if (w) { voice.capWaiters.delete(m.id); w(m); }
       return;
     }
     case "listening":
@@ -999,6 +1004,15 @@ const TOOLS = [
     },
   },
   {
+    name: "look", where: "server", core: true,
+    description: "Look at the user's screen (the main monitor) and answer about it: \"what am I looking at\", \"answer these questions\", \"what does this error mean\", \"read this to me\", \"which one should I pick\". Only when they ask about their screen. question = what they want to know, in their words. target: window (default, the window in front) or screen (the whole monitor). The full answer and the screenshot go into the Chat app, which opens; say the gist in a sentence or two.",
+    input_schema: {
+      type: "object",
+      properties: { question: { type: "string" }, target: { type: "string", enum: ["window", "screen"] } },
+      required: ["question"],
+    },
+  },
+  {
     name: "info", where: "server", core: true,
     description: "Everything the dashboard knows, to answer from. about: pc (CPU, GPU, temperatures, memory, network, busiest programs, uptime), phone (iPhone battery, notifications, calls), discord (voice channel, who is in it and talking, mute/deafen), audio (speakers, microphones, per-program volume), media (what is playing on the PC), claude_usage (Claude tokens and cost today, this month), lights, local_models, or everything.",
     input_schema: {
@@ -1124,6 +1138,87 @@ function bestMatch(list, q, nameOf) {
   const words = n.split(/\s+/).filter((w) => w.length > 1 && !/^(the|my|a|to)$/.test(w));
   return list.find((x) => nm(x) === n) || list.find((x) => nm(x).startsWith(n)) || list.find((x) => nm(x).includes(n))
     || (words.length ? list.find((x) => words.every((w) => nm(x).includes(w))) : null) || null;
+}
+
+// ---- look: the screen, through a vision model ---------------------------------------
+// The voice helper captures (the window in front, or the whole monitor, wide
+// shots in near-16:9 tiles; voice/Capture.cs). A model with eyes reads it:
+// Claude when there is a key, else a local model whose jarvis-models.ini entry
+// has an mmproj (the 9B and 4B do) — the loaded one when it can see, so
+// nothing is swapped. Measured on the 4B: a 1568x843 window shot read in
+// 0.6 s on the GPU, the answer in 1.2 s.
+function captureScreen(target) {
+  return new Promise((resolve) => {
+    if (!voiceStart()) return resolve({ ok: false, error: voice.err || "the voice helper isn't running" });
+    const id = ++voice.seq;
+    const timer = setTimeout(() => { voice.capWaiters.delete(id); resolve({ ok: false, error: "the capture took too long" }); }, 10000);
+    voice.capWaiters.set(id, (m) => { clearTimeout(timer); resolve(m); });
+    const send = () => voiceSend({ cmd: "capture", id, target: target === "screen" ? "screen" : "window", maxSide: 1568 });
+    if (voice.ready) send();
+    else { const t0 = Date.now(); const iv = setInterval(() => { if (voice.ready) { clearInterval(iv); send(); } else if (Date.now() - t0 > 8000) clearInterval(iv); }, 100); }
+  });
+}
+// Kept for the Chat app (the last 40), served at /api/jarvis/capture/<file>.
+function capturesDir() { return path.join(H.DATA, "captures"); }
+function saveCapture(images) {
+  const dir = capturesDir();
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
+  const id = "c" + Date.now().toString(36);
+  const files = images.map((im, i) => { const f = id + "-" + i + ".jpg"; fs.writeFileSync(path.join(dir, f), Buffer.from(im.data, "base64")); return f; });
+  try {
+    const all = fs.readdirSync(dir).filter((f) => /\.jpg$/.test(f)).sort();
+    for (const f of all.slice(0, Math.max(0, all.length - 40))) fs.unlinkSync(path.join(dir, f));
+  } catch (e) {}
+  return files;
+}
+function visionModel() {
+  const ini = models.readIni(settings);
+  const now = localModelNow();
+  const cur = ini.find((m) => m.id === now && m.mmproj);
+  if (cur) return cur.id;
+  // Nothing loaded that can see: the loaded one's size class first.
+  const seeing = ini.filter((m) => m.mmproj);
+  return (seeing.find((m) => /9b/i.test(m.id)) || seeing[0] || {}).id || null;
+}
+async function visionAsk(images, question) {
+  const prompt = "You are Jarvis, looking at " + who() + "'s screen (" + images.length + " image" + (images.length > 1 ? "s, left to right" : "") + "). " +
+    "They asked: \"" + question + "\". Answer that from what you can see. If they ask you to answer questions shown on screen, answer each one, numbered. " +
+    "If you can't make something out, say so rather than guess. Plain text; short lists are fine.";
+  const useClaude = !!H.readClaudeKey() && !!Anthropic && (settings.provider === "claude" || !(await localProbe(false)) || !visionModel());
+  if (useClaude) {
+    try {
+      const c = claudeClient();
+      const msg = await c.messages.create({
+        model: settings.claudeModel, max_tokens: 1200,
+        messages: [{ role: "user", content: [...images.map((im) => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: im.data } })), { type: "text", text: prompt }] }],
+      });
+      return { ok: true, text: msg.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim(), model: settings.claudeModel };
+    } catch (e) { return { ok: false, error: "Claude couldn't look: " + e.message }; }
+  }
+  const model = visionModel();
+  if (!model) return { ok: false, error: "No model here can see: add an mmproj to a model in jarvis-models.ini, or a Claude key." };
+  const base = settings.localUrl.replace(/\/+$/, "");
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 90000);
+    const r = await fetch(base + "/v1/chat/completions", {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal: ctl.signal,
+      body: JSON.stringify({
+        model, max_tokens: 900, temperature: 0.3, chat_template_kwargs: { enable_thinking: false },
+        messages: [{ role: "user", content: [{ type: "text", text: prompt }, ...images.map((im) => ({ type: "image_url", image_url: { url: "data:image/jpeg;base64," + im.data } }))] }],
+      }),
+    });
+    clearTimeout(t);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = (j.error && (j.error.message || j.error)) || "HTTP " + r.status;
+      // The router reads the ini when it starts: a new mmproj needs a restart.
+      if (/image|multimodal|mmproj|vision/i.test(String(msg))) return { ok: false, error: "The local server can't see yet: restart it to load the vision add-on (Jarvis settings › Local model › Restart). (" + msg + ")" };
+      return { ok: false, error: "The vision model failed: " + msg };
+    }
+    local.loaded = model;
+    return { ok: true, text: String(j.choices && j.choices[0] && j.choices[0].message.content || "").trim(), model };
+  } catch (e) { return { ok: false, error: e.name === "AbortError" ? "The vision model took too long." : "The local server isn't answering: " + e.message }; }
 }
 
 // ---- Wallpaper Engine ---------------------------------------------------------------
@@ -1592,6 +1687,19 @@ async function runServerTool(name, input, emit) {
       const r = await info(String(a.about || "everything"));
       return [JSON.stringify(r), !!(r && r.error)];
     }
+    case "look": {
+      const cap = await captureScreen(a.target);
+      if (!cap.ok) return ["Couldn't capture the screen: " + cap.error, true];
+      const files = saveCapture(cap.images);
+      const question = String(a.question || "What am I looking at?").slice(0, 600);
+      const v = await visionAsk(cap.images, question);
+      // "chrome — Some page", but just "Claude" when the window is named for its program.
+      const t = String(cap.title || "").slice(0, 80);
+      const what = !cap.process ? "the screen" : !t ? cap.process : t.toLowerCase().includes(cap.process.toLowerCase()) ? t : cap.process + " — " + t;
+      emit({ type: "card", card: { kind: "look", title: what, question, images: files.map((f) => "/api/jarvis/capture/" + f), answer: v.ok ? v.text : null, error: v.ok ? null : v.error, model: v.model || null } });
+      if (!v.ok) return [v.error, true];
+      return ["Looked at " + what + ". What it shows / the answer (already written out in the Chat app, which is opening):\n" + v.text.slice(0, 6000)];
+    }
     case "phone": {
       const s = await selfJson("/api/phone");
       if (!s || s.ok === false) return [(s && s.error) || "The phone bridge isn't running.", true];
@@ -1630,6 +1738,7 @@ function who() { return settings.name || "the user"; }
 // leads with the rules for tools, then says which tool answers what — built
 // from the tools this model actually has — then shows it done.
 const TOOL_GUIDE = {
+  look: "anything about what is on the user's screen: \"what am I looking at\", \"answer these questions\", \"what does this error say\", \"help me with this\". It answers in full in the Chat app; you say the gist",
   info: "anything about the PC (CPU, GPU, temperatures, memory, network, what is running, uptime), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
   panel: "this app itself: check for or install updates, switch forks, a theme, your own settings, reload; the PC's screensaver (\"screensaver\", \"go to sleep\" for the screens); Wallpaper Engine (next wallpaper, pause it)",
   layout: "what is on the screen and where: open an app, full screen (focus) and back, the Home layout (and saving a new one), show or hide widgets, put an app in a panel beside the widgets, resize, move, collapse, scenes, a sum on the calculator, pinning a window. The bracketed line says what is on screen now",
@@ -1657,6 +1766,8 @@ const TOOL_GUIDE = {
 const TOOL_EXAMPLES = [
   ["turn it down a bit", "volume {action: down}", "then say the new level it returned"],
   ["is something hogging my GPU?", "info {about: pc}", "then answer from the GPU numbers and the busiest programs"],
+  ["what am I looking at here?", "look {question: what am I looking at}", "then one or two sentences; the full answer is in the Chat app"],
+  ["answer these questions for me", "look {question: answer the questions on screen}", "then say they're answered in the chat"],
   ["any updates?", "panel {action: check_updates}", "then say exactly what it returned"],
   ["lights blue and play some jazz", "lights {action: color, color: blue} and music {action: play, query: jazz}, both in one go", "then \"Blue, and jazz is on.\""],
   ["who's talking?", "discord {action: status}", ""],
@@ -2043,7 +2154,11 @@ async function runLoop(conv, emit, signal) {
           [out, isErr] = ["You have already searched " + MAX_SEARCHES + " times for this question. Do not search again: " +
             "answer now from the results you have (read_page one of them if you need detail), or say you could not find it.", true];
         }
-        else [out, isErr] = await runServerTool(u.name, u.input, emit);
+        else [out, isErr] = await runServerTool(u.name, u.input, (ev) => {
+          // Cards go to the panel now and into the chat log with the exchange.
+          if (ev.type === "card" && conv.log.cards) conv.log.cards.push(ev.card);
+          emit(ev);
+        });
       } catch (e) { out = "Tool failed: " + e.message; isErr = true; }
       emit({ type: "tool", id: u.id, name: u.name, status: "done", ok: !isErr });
       return { type: "tool_result", tool_use_id: u.id, content: String(out == null ? "" : out), ...(isErr ? { is_error: true } : {}) };
@@ -2067,7 +2182,30 @@ function finish(conv, emit) {
     // What he first said instead of using a tool, when the reminder caught it.
     ...(conv.nudged ? { caught: conv.nudged.said } : {}),
   });
+  // The Chat app's log: the exchange, the cards that came with it (what he
+  // looked at, what he found), as it happened.
+  addChat({
+    id: "m" + Date.now().toString(36), at: Date.now(), conv: conv.id,
+    heard: conv.log.heard, reply: conv.log.reply.trim(), tools: [...new Set(conv.log.tools)],
+    cards: (conv.log.cards || []).slice(0, 6), model: conv.model || null,
+  });
   emit({ type: "done", conv: conv.id });
+}
+
+// ---- the chat log -------------------------------------------------------------------
+function chatFile() { return H.stateFile("jarvis-chat.json"); }
+let chat = null;
+function loadChat() {
+  if (chat) return chat;
+  try { chat = JSON.parse(fs.readFileSync(chatFile(), "utf8")); } catch (e) { chat = []; }
+  if (!Array.isArray(chat)) chat = [];
+  return chat;
+}
+function addChat(entry) {
+  loadChat().push(entry);
+  chat = chat.slice(-200);
+  try { fs.writeFileSync(chatFile(), JSON.stringify(chat)); } catch (e) {}
+  broadcast({ type: "chat", entry });
 }
 
 async function handleTurn(req, res) {
@@ -2102,9 +2240,11 @@ async function handleTurn(req, res) {
         if (!conv || conv.pending) conv = newConv();
         // A provider switch mid-conversation is fine, but pick once per turn.
         conv.provider = await chooseProvider();
-        conv.log = { heard: text, reply: "", tools: [] };
+        conv.log = { heard: text, reply: "", tools: [], cards: [] };
         conv.searches = 0;
         conv.nudged = null; conv.nudge = null;
+        // The Chat app shows the question at once, with a "thinking" bubble.
+        broadcast({ type: "chat-pending", heard: text, at: Date.now() });
         conv.messages.push({ role: "user", content: [{ type: "text", text: contextLine(body.context) + "\n" + text }] });
         emit({ type: "start", conv: conv.id, provider: conv.provider, model: conv.provider === "claude" ? settings.claudeModel : localModelNow() });
       }
@@ -2234,6 +2374,25 @@ async function handle(req, res, urlPath) {
     await localProbe(false);
     return json(res, 200, { ok: true, models: localModels(), needsRestart: local.needsRestart, downloads: models.list(), dir: models.modelsDir(settings) });
   }
+  // ---- The Chat app: the log, clearing it, the screenshots in it ----
+  if (sub === "chat" && req.method === "GET") return json(res, 200, { ok: true, entries: loadChat().slice(-120) });
+  if (sub === "chat/clear" && req.method === "POST") {
+    chat = [];
+    try { fs.writeFileSync(chatFile(), "[]"); } catch (e) {}
+    try { for (const f of fs.readdirSync(capturesDir())) fs.unlinkSync(path.join(capturesDir(), f)); } catch (e) {}
+    broadcast({ type: "chat-cleared" });
+    return json(res, 200, { ok: true });
+  }
+  if (sub.startsWith("capture/") && req.method === "GET") {
+    const f = sub.slice("capture/".length);
+    if (!/^c[a-z0-9]+-\d+\.jpg$/.test(f)) return json(res, 404, { ok: false });
+    fs.readFile(path.join(capturesDir(), f), (err, data) => {
+      if (err) return json(res, 404, { ok: false });
+      res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=86400" });
+      res.end(data);
+    });
+    return;
+  }
   // ---- One server tool, run when an alarm or timer with work goes off ----
   if (sub === "run" && req.method === "POST") {
     return H.readJsonBody(req, res, async (body) => {
@@ -2362,7 +2521,7 @@ function init(host) {
 
 module.exports = {
   init, handle,
-  STATE_FILES: ["jarvis.json", "jarvis-memory.json", "jarvis-history.json"].concat(govee.STATE_FILES),
+  STATE_FILES: ["jarvis.json", "jarvis-memory.json", "jarvis-history.json", "jarvis-chat.json"].concat(govee.STATE_FILES),
   // For test harnesses: run one server-side tool as a model would.
   runServerTool, TOOLS,
 };

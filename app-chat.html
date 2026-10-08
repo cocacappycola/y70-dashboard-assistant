@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en" data-surface="trim">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Chat</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/ui.css" />
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden;
+      background: var(--t-bg, #000); color: var(--t-text, #f2f2f7);
+      font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    #wrap { height: 100%; display: flex; flex-direction: column; }
+
+    /* ---- Header ---- */
+    #head {
+      flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+      background: var(--t-bg-2, #101014); border-bottom: 1px solid var(--t-accent-line, rgba(168,92,214,.35));
+      user-select: none;
+    }
+    .orb {
+      width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+      background: radial-gradient(circle at 35% 30%, #fff 0, #b9a6ff 18%, var(--t-accent, #a85cd6) 55%, #26124a 100%);
+      box-shadow: 0 0 12px var(--t-accent-soft, rgba(168,92,214,.4));
+    }
+    #title { font-size: 15px; font-weight: 750; }
+    #sub { font-size: 11px; color: var(--t-sub, #a6a6b3); }
+    .spacer { flex: 1; }
+
+    /* ---- The conversation ---- */
+    #log { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 12px 8px; display: flex; flex-direction: column; gap: 10px; }
+    #log::-webkit-scrollbar { width: 4px; height: 0; }
+    #log::-webkit-scrollbar-thumb { background: var(--t-accent-dim, #3a3a42); border-radius: 2px; }
+    #log::-webkit-scrollbar-button { display: none; }
+    .day { align-self: center; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--t-muted, #7a7a85); margin: 6px 0 2px; }
+    .msg { max-width: 88%; padding: 9px 12px; border-radius: 16px; font-size: 14px; line-height: 1.45; word-wrap: break-word; user-select: text; }
+    .me { align-self: flex-end; background: var(--t-accent, #a85cd6); color: var(--t-accent-ink, #fff); border-bottom-right-radius: 5px; }
+    .him { align-self: flex-start; background: var(--t-surface, #16161a); border: 1px solid var(--t-line, #2c2c33); border-bottom-left-radius: 5px; }
+    .him p { margin: 0 0 6px; } .him p:last-child { margin-bottom: 0; }
+    .him ul, .him ol { margin: 4px 0 6px; padding-left: 20px; }
+    .him code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: rgba(255,255,255,.07); padding: 0 4px; border-radius: 4px; }
+    .meta { align-self: flex-start; font-size: 10.5px; color: var(--t-muted, #7a7a85); margin: -6px 0 0 6px; }
+    .typing { display: inline-flex; gap: 4px; padding: 3px 0; }
+    .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--t-sub, #a6a6b3); animation: blink 1.2s infinite ease-in-out; }
+    .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
+    @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
+    /* ---- Cards: what he looked at, what he found ---- */
+    .card { align-self: flex-start; width: 92%; background: var(--t-bg-2, #101014); border: 1px solid var(--t-line, #2c2c33); border-radius: 14px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .card .ct { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--t-accent, #a85cd6); }
+    .card .cq { font-size: 12px; color: var(--t-sub, #a6a6b3); }
+    .shots { display: flex; gap: 6px; }
+    .shots img { flex: 1; min-width: 0; border-radius: 8px; border: 1px solid var(--t-line, #2c2c33); cursor: zoom-in; display: block; }
+    .answer { font-size: 13.5px; line-height: 1.5; user-select: text; }
+    .answer p { margin: 0 0 6px; } .answer ul, .answer ol { margin: 4px 0 6px; padding-left: 20px; }
+    .err { color: #ff8f8f; font-size: 13px; }
+    .res a { display: block; color: var(--t-text, #fff); text-decoration: none; padding: 5px 0; border-top: 1px solid var(--t-line, #2c2c33); font-size: 13px; }
+    .res a:first-child { border-top: 0; }
+    .res a span { display: block; font-size: 11px; color: var(--t-muted, #7a7a85); }
+    .pics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+    .pics img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 7px; cursor: zoom-in; }
+    #empty { margin: auto; text-align: center; color: var(--t-sub, #a6a6b3); font-size: 13.5px; line-height: 1.6; padding: 30px; }
+    #empty b { display: block; color: var(--t-text, #fff); font-size: 16px; margin: 10px 0 4px; }
+
+    /* ---- Typing to him ---- */
+    #compose { flex-shrink: 0; display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--t-line, #2c2c33); background: var(--t-bg-2, #101014); }
+    #say { flex: 1; min-width: 0; }
+
+    /* ---- A screenshot, big ---- */
+    #big { position: fixed; inset: 0; background: rgba(0,0,0,.92); display: none; align-items: center; justify-content: center; z-index: 10; cursor: zoom-out; }
+    #big.show { display: flex; }
+    #big img { max-width: 100%; max-height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="head">
+      <span class="orb"></span>
+      <div><div id="title">Jarvis</div><div id="sub">your conversation</div></div>
+      <span class="spacer"></span>
+      <button class="btn btn--ghost btn--sm" id="clear">Clear</button>
+    </div>
+    <div id="log"></div>
+    <form id="compose">
+      <input class="ui-input" id="say" placeholder="Type to Jarvis…" autocomplete="off" />
+      <button class="btn btn--primary btn--sm" id="send" type="submit">Send</button>
+    </form>
+  </div>
+  <div id="big"><img alt="" /></div>
+
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const log = $("#log");
+    const API = "/api/jarvis/";
+    let entries = [];
+    let pending = null;          // { heard, at } while a turn runs
+
+    // ---- A little markdown: paragraphs, lists, **bold**, `code` -------------
+    const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const inline = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    function md(text) {
+      const out = [];
+      let list = null;
+      for (const raw of String(text || "").split(/\r?\n/)) {
+        const t = raw.trim();
+        const ul = t.match(/^[-*•]\s+(.*)$/), ol = t.match(/^(\d+)[.)]\s+(.*)$/);
+        if (ul || ol) {
+          const kind = ul ? "ul" : "ol";
+          if (!list || list.kind !== kind) { if (list) out.push("</" + list.kind + ">"); list = { kind }; out.push("<" + kind + ">"); }
+          out.push("<li>" + inline(ul ? ul[1] : ol[2]) + "</li>");
+          continue;
+        }
+        if (list) { out.push("</" + list.kind + ">"); list = null; }
+        if (t) out.push("<p>" + inline(t.replace(/^#{1,4}\s+/, "")) + "</p>");
+      }
+      if (list) out.push("</" + list.kind + ">");
+      return out.join("");
+    }
+
+    const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+    const clock = (at) => new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const dayOf = (at) => new Date(at).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+
+    function cardEl(c) {
+      if (c.kind === "look") {
+        const box = el("div", "card");
+        box.appendChild(el("div", "ct", "Looked at " + esc(c.title || "the screen")));
+        if (c.question) box.appendChild(el("div", "cq", "“" + esc(c.question) + "”"));
+        const shots = el("div", "shots");
+        for (const src of c.images || []) { const im = el("img"); im.src = src; im.alt = "screenshot"; shots.appendChild(im); }
+        box.appendChild(shots);
+        box.appendChild(c.answer ? el("div", "answer", md(c.answer)) : el("div", "err", esc(c.error || "No answer.")));
+        return box;
+      }
+      if (c.kind === "results" && (c.items || []).length) {
+        const box = el("div", "card res");
+        box.appendChild(el("div", "ct", "Found · " + esc(c.query || "")));
+        for (const it of c.items.slice(0, 6)) {
+          const a = el("a", null, esc(it.title) + "<span>" + esc(it.snippet || it.url || "") + "</span>");
+          a.href = "#"; a.addEventListener("click", (e) => { e.preventDefault(); openUrl(it.url); });
+          box.appendChild(a);
+        }
+        return box;
+      }
+      if (c.kind === "images" && (c.items || []).length) {
+        const box = el("div", "card");
+        box.appendChild(el("div", "ct", "Pictures · " + esc(c.query || "")));
+        const g = el("div", "pics");
+        for (const it of c.items.slice(0, 9)) { const im = el("img"); im.src = it.thumb || it.url; im.dataset.full = it.url; g.appendChild(im); }
+        box.appendChild(g);
+        return box;
+      }
+      if (c.kind === "page") return el("div", "card", '<div class="ct">Read</div><div class="answer">' + esc(c.title || c.url) + "</div>");
+      return null;
+    }
+
+    function render(stick) {
+      const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+      log.innerHTML = "";
+      if (!entries.length && !pending) {
+        log.appendChild(el("div", null, '<div id="empty"><span class="orb" style="display:inline-block;width:40px;height:40px"></span><b>Nothing yet</b>Ask Jarvis something, or say “Jarvis, what am I looking at?” — what he sees and says lands here.</div>'));
+        return;
+      }
+      let day = "";
+      for (const e of entries) {
+        const d = dayOf(e.at);
+        if (d !== day) { day = d; log.appendChild(el("div", "day", esc(d))); }
+        if (e.heard) log.appendChild(el("div", "msg me", esc(e.heard)));
+        for (const c of e.cards || []) { const ce = cardEl(c); if (ce) log.appendChild(ce); }
+        if (e.reply) log.appendChild(el("div", "msg him", md(e.reply)));
+        const tools = (e.tools || []).filter((t) => t !== "look");
+        log.appendChild(el("div", "meta", clock(e.at) + (tools.length ? " · " + esc(tools.join(", ")) : "") + (e.model ? " · " + esc(e.model) : "")));
+      }
+      if (pending) {
+        log.appendChild(el("div", "msg me", esc(pending.heard)));
+        log.appendChild(el("div", "msg him", '<span class="typing"><i></i><i></i><i></i></span>'));
+      }
+      if (stick || atBottom) log.scrollTop = log.scrollHeight;
+    }
+
+    async function load() {
+      try { const r = await (await fetch(API + "chat")).json(); entries = r.entries || []; } catch (e) {}
+      render(true);
+    }
+
+    // ---- Live, as he works ----------------------------------------------------
+    function connect() {
+      const es = new EventSource(API + "events");
+      es.onmessage = (m) => {
+        let ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
+        if (ev.type === "chat-pending") { pending = { heard: ev.heard, at: ev.at }; render(true); }
+        if (ev.type === "chat") { pending = null; entries.push(ev.entry); entries = entries.slice(-120); render(true); }
+        if (ev.type === "chat-cleared") { entries = []; pending = null; render(true); }
+      };
+      es.onerror = () => { es.close(); setTimeout(connect, 3000); };
+    }
+
+    // ---- Taps -------------------------------------------------------------------
+    log.addEventListener("click", (e) => {
+      const im = e.target.closest(".shots img, .pics img");
+      if (!im) return;
+      $("#big img").src = im.dataset.full || im.src;
+      $("#big").classList.add("show");
+    });
+    $("#big").addEventListener("click", () => $("#big").classList.remove("show"));
+    function openUrl(url) {
+      try { parent.y70Jarvis.runTool("open_web", { url }); } catch (e) {}
+    }
+    // Clearing deletes the log and the screenshots, so it asks once.
+    let armed = 0;
+    $("#clear").addEventListener("click", async () => {
+      if (Date.now() - armed > 4000) { armed = Date.now(); $("#clear").textContent = "Tap again to clear"; setTimeout(() => { $("#clear").textContent = "Clear"; }, 4000); return; }
+      armed = 0; $("#clear").textContent = "Clear";
+      await fetch(API + "chat/clear", { method: "POST" });
+    });
+
+    // Typing: the panel lends the keyboard while the box has focus.
+    const say = $("#say");
+    const kb = (on) => { try { parent.postMessage({ type: "y70:keyboard", on }, "*"); } catch (e) {} };
+    say.addEventListener("focus", () => kb(true));
+    say.addEventListener("blur", () => kb(false));
+    $("#compose").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const t = say.value.trim();
+      if (!t) return;
+      say.value = "";
+      say.blur();
+      try { parent.y70Jarvis.ask(t); } catch (err) {}
+    });
+
+    load();
+    connect();
+  </script>
+</body>
+</html>

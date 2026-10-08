@@ -31,3 +31,5 @@ ancs/obj/
 # Voice helper build output (rebuilt with: cd voice && dotnet publish -c Release -o bin/out)
 voice/bin/
 voice/obj/
+captures/
+jarvis-chat.json

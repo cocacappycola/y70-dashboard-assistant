@@ -46,7 +46,8 @@ function modelsDir(settings) {
 }
 function iniPath(settings) { return path.join(modelsDir(settings), "jarvis-models.ini"); }
 
-// [id] sections and their model= lines.
+// [id] sections and their model= lines, and mmproj= (the vision add-on: a
+// model with one can look at the screen).
 function readIni(settings) {
   let text = "";
   try { text = fs.readFileSync(iniPath(settings), "utf8"); } catch (e) { return []; }
@@ -55,9 +56,11 @@ function readIni(settings) {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     const sec = line.match(/^\[([^\]]+)\]$/);
-    if (sec) { cur = { id: sec[1].trim(), file: null }; out.push(cur); continue; }
+    if (sec) { cur = { id: sec[1].trim(), file: null, mmproj: null }; out.push(cur); continue; }
     const kv = line.match(/^model\s*=\s*(.+)$/);
     if (kv && cur) cur.file = kv[1].trim();
+    const mp = line.match(/^mmproj\s*=\s*(.+)$/);
+    if (mp && cur) cur.mmproj = mp[1].trim();
   }
   return out;
 }

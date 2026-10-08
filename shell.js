@@ -12,6 +12,8 @@ const APPS = {
   // Any page Jarvis opens for you (a model's Hugging Face page, a link from a
   // search), in the same kind of native view as the apps above.
   web: { title: "Web", src: "/app-web.html?site=web", ico: "web-ico", glyph: "🌐" },
+  // Jarvis's conversation: what was asked, what he said, what he looked at.
+  chat: { title: "Chat", src: "/app-chat.html", ico: "jarvis-ico", glyph: "💬" },
 };
 const WEB_APPS = /^(youtube|shorts|tiktok|snapchat|web)$/;
 

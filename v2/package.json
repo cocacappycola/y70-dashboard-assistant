@@ -48,6 +48,7 @@
           "index.html",
           "shell.html",
           "app-web.html",
+          "app-chat.html",
           "weather-app.html",
           "widget-*.html",
           "styles.css",

@@ -31,7 +31,7 @@ using WinTts = Windows.Media.SpeechSynthesis;
 
 namespace Y70Voice;
 
-internal static class Program
+internal static partial class Program
 {
     static readonly object _outLock = new();
     static readonly CultureInfo EnUs = new("en-US");
@@ -135,6 +135,10 @@ internal static class Program
                 break;
             case "voices":
                 Emit(new { type = "voices", voices = VoiceList() });
+                break;
+            // What is on the screen, for Jarvis to look at (Capture.cs).
+            case "capture":
+                _ = Task.Run(() => CaptureScreen(Int(m, "id", 0), Str(m, "target") ?? "window", Int(m, "maxSide", 1568)));
                 break;
             case "game":
                 SetGameWatch(Bool(m, "on", true));
