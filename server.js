@@ -9,6 +9,7 @@
 //    /api/claude  -> proxies to Anthropic's Messages API using the key in
 //                    claude-key.txt (so the key never ships to the page)
 //    /api/pcstats -> live machine telemetry (RAM/CPU/GPU/network/top talkers)
+//    /api/sensors -> every LibreHardwareMonitor sensor (?find=fan narrows it)
 //    /api/system  -> audio devices + per-app mixer + Windows media session
 //    /api/lyrics  -> LRCLIB proxy (free, key-less), cached
 //    /api/notes   -> reads/writes notes.txt in the data folder
@@ -27,6 +28,7 @@ const os = require("os");
 const { spawn } = require("child_process");
 const https = require("https");
 const discord = require("./discord");
+const lhm = require("./lhm");
 const assistant = require("./assistant");
 
 let Anthropic = null;
@@ -414,14 +416,70 @@ function pushHistory() {
   push("t", Date.now());
   push("cpu", cpu.pct == null ? null : Math.round(cpu.pct));
   push("ram", Math.round(((totalMem - freeMem) / totalMem) * 100));
-  push("gpu", b && b.gpu ? Math.round(b.gpu.util) : null);
-  push("gpuTemp", b && b.gpu ? Math.round(b.gpu.temp) : null);
-  push("cpuTemp", b && b.cpuTemp ? Math.round(b.cpuTemp.c) : null);
+  const g = gpuReading(b), ct = cpuTempReading(b);
+  push("gpu", g ? Math.round(g.util) : null);
+  push("gpuTemp", g && g.temp != null ? Math.round(g.temp) : null);
+  push("cpuTemp", ct ? Math.round(ct.c) : null);
   push("down", down);
   push("up", up);
   lastCores = cpu.cores.length ? cpu.cores : lastCores;
+  lhm.poke();
 }
 let lastCores = [];
+
+// ---- LibreHardwareMonitor ----------------------------------------------------
+// lhm.js reads LHM's web server; its readings take over where Windows has
+// nothing (CPU temperature) and fill in what nvidia-smi doesn't say (hot spot,
+// memory junction, power, fans), plus drives, case fans and board temps.
+function lhmSummary() {
+  const s = lhm.state();
+  return s.ok ? s.summary : null;
+}
+function cpuTempReading(b) {
+  const l = lhmSummary();
+  if (l && l.cpu && l.cpu.tempC != null) return { c: l.cpu.tempC, src: "LibreHardwareMonitor" };
+  return b && b.cpuTemp ? b.cpuTemp : null;
+}
+// nvidia-smi's figures where it has them; LHM's for everything else, and for
+// a card nvidia-smi doesn't know (AMD, Intel).
+function gpuReading(b) {
+  const l = lhmSummary();
+  const lg = l && l.gpu;
+  const base = b && b.gpu ? Object.assign({}, b.gpu)
+    : lg ? { name: lg.name, temp: lg.tempC, util: lg.loadPct, memUsed: lg.vramUsedMB, memTotal: lg.vramTotalMB }
+    : null;
+  if (!base || !lg) return base;
+  return Object.assign(base, {
+    hotspot: lg.hotspotC, memTemp: lg.memoryC, powerW: lg.powerW,
+    coreMHz: lg.coreMHz, memMHz: lg.memMHz, fans: lg.fans, fanPct: lg.fanPct,
+  });
+}
+// What the widget and Jarvis need to know about LHM itself.
+function lhmStatus() {
+  const s = lhm.state(), l = s.summary;
+  return {
+    ok: s.ok, url: s.url, error: s.ok ? null : s.error,
+    cpuBlocked: !!(l && l.cpu && l.cpu.blocked),
+  };
+}
+
+async function handleSensors(req, res) {
+  const q = (new URL(req.url, "http://localhost").searchParams.get("find") || "").toLowerCase().trim();
+  const s = await lhm.read();
+  if (!s.ok) return json(res, 200, { ok: false, error: s.error, url: s.url });
+  let hardware = s.hardware;
+  if (q) {
+    const words = q.split(/\s+/);
+    const hit = (t) => words.every((w) => t.includes(w));
+    hardware = hardware
+      .map((h) => {
+        const hwText = (h.name + " " + h.kind + " " + h.id).toLowerCase();
+        return Object.assign({}, h, { sensors: h.sensors.filter((x) => hit(hwText + " " + (x.name + " " + x.type + " " + x.unit).toLowerCase())) });
+      })
+      .filter((h) => h.sensors.length);
+  }
+  return json(res, 200, { ok: true, at: s.at, url: s.url, status: lhmStatus(), summary: s.summary, hardware });
+}
 
 // History only accumulates while something is watching; the sampler it reads
 // from is itself shut down after a minute of no requests.
@@ -458,14 +516,25 @@ function handlePcStats(req, res) {
   base.cpu.pct = lastCpu == null ? null : lastCpu;
 
   const a = pc.prev, b = pc.last;
+
+  // Sensors: LHM's where it has them, the sampler's otherwise. These don't
+  // wait on the sampler, so they are there from the first answer.
+  lhm.poke();
+  const l = lhmSummary();
+  const ct = cpuTempReading(b);
+  base.cpu.tempC = ct ? ct.c : null;
+  base.cpu.tempSrc = ct ? ct.src : null;
+  if (l && l.cpu) { base.cpu.powerW = l.cpu.powerW; base.cpu.clockMHz = l.cpu.clockMHz; }
+  base.gpu = gpuReading(b);
+  base.drives = l ? l.drives : null;
+  base.fans = l && l.fans.length ? l.fans : null;
+  base.boardTemps = l && l.temps.length ? l.temps : null;
+  base.lhm = lhmStatus();
+
   if (!b) {
     // First call: the sampler is up but has not produced two samples yet.
     return json(res, 200, Object.assign(base, { warming: true, error: pc.err }));
   }
-
-  base.gpu = b.gpu || null;
-  base.cpu.tempC = b.cpuTemp ? b.cpuTemp.c : null;
-  base.cpu.tempSrc = b.cpuTemp ? b.cpuTemp.src : null;
 
   // --- Connections, grouped by owning process --------------------------------
   const nameOf = new Map();
@@ -954,6 +1023,7 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && urlPath === "/api/claude") return handleClaude(req, res);
   if (req.method === "GET" && urlPath === "/api/claude-stats") return handleClaudeStats(req, res);
   if (req.method === "GET" && urlPath === "/api/pcstats") return handlePcStats(req, res);
+  if (req.method === "GET" && urlPath === "/api/sensors") return handleSensors(req, res);
   if (urlPath === "/api/phone" && req.method === "GET") return handlePhoneGet(req, res);
   if (urlPath === "/api/phone" && req.method === "POST") return handlePhonePost(req, res);
   if (urlPath === "/api/discord" && (req.method === "GET" || req.method === "POST")) return handleDiscord(req, res);

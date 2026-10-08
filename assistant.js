@@ -1014,10 +1014,13 @@ const TOOLS = [
   },
   {
     name: "info", where: "server", core: true,
-    description: "Everything the dashboard knows, to answer from. about: pc (CPU, GPU, temperatures, memory, network, busiest programs, uptime), phone (iPhone battery, notifications, calls), discord (voice channel, who is in it and talking, mute/deafen), audio (speakers, microphones, per-program volume), media (what is playing on the PC), claude_usage (Claude tokens and cost today, this month), lights, local_models, or everything.",
+    description: "Everything the dashboard knows, to answer from. about: pc (CPU, GPU, temperatures, power draw, fans, every drive's temperature, free space and health, memory, network, busiest programs, uptime), sensors (every reading LibreHardwareMonitor has: temperatures, fan speeds, clocks, voltages, power, drive health, per network adapter; find narrows it, e.g. find: \"fan\", \"nvme temperature\", \"voltage\"), phone (iPhone battery, notifications, calls), discord (voice channel, who is in it and talking, mute/deafen), audio (speakers, microphones, per-program volume), media (what is playing on the PC), claude_usage (Claude tokens and cost today, this month), lights, local_models, or everything.",
     input_schema: {
       type: "object",
-      properties: { about: { type: "string", enum: ["everything", "pc", "phone", "discord", "audio", "media", "claude_usage", "lights", "local_models"] } },
+      properties: {
+        about: { type: "string", enum: ["everything", "pc", "sensors", "phone", "discord", "audio", "media", "claude_usage", "lights", "local_models"] },
+        find: { type: "string" },
+      },
       required: ["about"],
     },
   },
@@ -1380,15 +1383,66 @@ const INFO = {
     let s = await selfJson("/api/pcstats");
     if (s.warming) { await sleep(2600); s = await selfJson("/api/pcstats"); }
     if (!s || s.ok === false) return { error: (s && s.error) || "no PC stats" };
+    const l = s.lhm || {};
     return {
-      cpu: s.cpu && { pct: s.cpu.pct, tempC: s.cpu.tempC, name: String(s.cpu.name || "").trim(), threads: s.cpu.cores },
-      gpu: s.gpu && { name: s.gpu.name, pct: s.gpu.util, tempC: s.gpu.temp, vramUsedMB: s.gpu.memUsed, vramTotalMB: s.gpu.memTotal },
+      cpu: s.cpu && {
+        pct: s.cpu.pct, tempC: s.cpu.tempC, powerW: s.cpu.powerW ?? undefined, clockMHz: s.cpu.clockMHz ?? undefined,
+        name: String(s.cpu.name || "").trim(), threads: s.cpu.cores,
+        tempNote: s.cpu.tempC != null ? undefined
+          : l.cpuBlocked ? "No CPU temperature: LibreHardwareMonitor is running but its PawnIO driver isn't loaded, so it can't read the CPU. Fix: install PawnIO (pawnio.eu) as admin, then restart LibreHardwareMonitor."
+          : !l.ok ? "No CPU temperature: " + (l.error || "LibreHardwareMonitor isn't reachable") + "."
+          : undefined,
+      },
+      gpu: s.gpu && {
+        name: s.gpu.name, pct: s.gpu.util, tempC: s.gpu.temp, hotspotC: s.gpu.hotspot ?? undefined, memoryC: s.gpu.memTemp ?? undefined,
+        powerW: s.gpu.powerW ?? undefined, coreMHz: s.gpu.coreMHz ?? undefined,
+        fans: s.gpu.fans ? s.gpu.fans.map((f) => f.rpm + " rpm").join(", ") + (s.gpu.fanPct != null ? " (" + s.gpu.fanPct + "%)" : "") : undefined,
+        vramUsedMB: s.gpu.memUsed, vramTotalMB: s.gpu.memTotal,
+      },
+      drives: s.drives || undefined,
+      fans: s.fans || undefined,
+      boardTemps: s.boardTemps || undefined,
       ram: s.ram,
       net: s.net && { downMbps: +(s.net.downBps * 8 / 1e6).toFixed(2), upMbps: +(s.net.upBps * 8 / 1e6).toFixed(2) },
       uptimeHours: s.uptime ? +(s.uptime / 3600).toFixed(1) : null,
       busiest: (s.busiest || []).slice(0, 5).map((p) => ({ name: p.name, diskAndNetMBps: +(p.ioBps / 1e6).toFixed(2) })),
       online: (s.talkers || []).slice(0, 5).map((p) => ({ name: p.name, connections: p.conns, hosts: p.hosts })),
       game: game.on ? (game.exe || "fullscreen") : null,
+    };
+  },
+  // Every LHM reading, one line each, grouped by hardware. Unasked, the noisy
+  // kinds (voltages, per-core and per-engine figures, idle adapters) stay out
+  // so a small model's context isn't spent on them; find brings anything back.
+  async sensors(a) {
+    const find = String((a && a.find) || "").trim();
+    const s = await selfJson("/api/sensors" + (find ? "?find=" + encodeURIComponent(find) : ""));
+    if (!s || !s.ok) return { error: (s && s.error) || "no sensor data" };
+    const blocked = s.status && s.status.cpuBlocked;
+    const fmt = (v, unit) => (unit === "V" ? Math.round(v * 1000) / 1000 : Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10);
+    const noisy = (h, x) => !find && (
+      x.type === "Voltage" || (x.type === "Factor" && !/Power On Hours/i.test(x.name)) ||
+      /^D3D |^CPU Core #|^Core #\d+( \(|$)|^Core #\d+ \(SMU\)/.test(x.name) ||
+      h.kind === "virtual-memory" || (h.kind === "network" && !(x.value > 0)) ||
+      (h.kind === "gpu" && h !== s.hardware.find((g) => g.kind === "gpu" && /nvidia/.test(g.id)) && s.hardware.some((g) => /nvidia/.test(g.id))));
+    const out = {};
+    for (const h of s.hardware) {
+      const lines = h.sensors
+        .filter((x) => x.value != null && !noisy(h, x))
+        // Without the driver the CPU's zeros and its fixed VIDs are placeholders, not readings.
+        .filter((x) => !(blocked && h.kind === "cpu" && (/Temperature|Power|Clock/.test(x.type) && !x.value || x.type === "Voltage")))
+        .map((x) => x.name + " [" + x.type + "]: " + fmt(x.value, x.unit) + (x.unit ? " " + x.unit : "") + (x.max != null && x.max !== x.value && x.type !== "Data" ? " (max " + fmt(x.max, x.unit) + ")" : ""));
+      const d = h.kind === "drive" && lines.length && ((s.summary && s.summary.drives) || []).find((x) => x.name === h.name);
+      if (d && d.hot) lines.unshift("RUNNING HOT for this drive (" + d.tempC + " °C" + (d.warnC ? ", its warning point is " + d.warnC + " °C" : d.type === "hdd" ? "; hard drives are rated to about 55-60 °C" : "") + ")");
+      if (lines.length) out[h.name + " (" + h.kind + ")"] = lines;
+    }
+    if (!Object.keys(out).length) return { error: find ? "No sensor matches \"" + find + "\"." : "LibreHardwareMonitor shows no sensors." };
+    return {
+      source: "LibreHardwareMonitor",
+      note: [
+        blocked ? "The CPU's temperature, power and clocks are missing: LibreHardwareMonitor's PawnIO driver isn't loaded (install PawnIO as admin, then restart LibreHardwareMonitor). The motherboard's fans and temperatures need it too." : "",
+        find ? "" : "Voltages, per-core and per-engine figures are left out; ask with find (e.g. voltage, core, d3d) for them.",
+      ].filter(Boolean).join(" ") || undefined,
+      sensors: out,
     };
   },
   async phone() {
@@ -1452,11 +1506,12 @@ const INFO = {
     return { serverUp: local.up, loaded: local.loaded, models: localModels(), needsRestart: local.needsRestart, downloads: models.list() };
   },
 };
-async function info(about) {
+async function info(about, a) {
   const one = INFO[about];
-  if (one) return one();
-  // everything: every section at once, each given a few seconds.
-  const keys = Object.keys(INFO);
+  if (one) return one(a);
+  // everything: every section at once, each given a few seconds. (pc already
+  // carries the sensor summary; the full list is only on request.)
+  const keys = Object.keys(INFO).filter((k) => k !== "sensors");
   const out = {};
   await Promise.all(keys.map(async (k) => {
     out[k] = await Promise.race([INFO[k]().catch((e) => ({ error: e.message })), sleep(6000).then(() => ({ error: "took too long" }))]);
@@ -1684,7 +1739,7 @@ async function runServerTool(name, input, emit) {
       return [r.msg + "\nThe notes now:\n" + (numbered(text) || "(empty)")];
     }
     case "info": {
-      const r = await info(String(a.about || "everything"));
+      const r = await info(String(a.about || "everything"), a);
       return [JSON.stringify(r), !!(r && r.error)];
     }
     case "look": {
@@ -1739,7 +1794,7 @@ function who() { return settings.name || "the user"; }
 // from the tools this model actually has — then shows it done.
 const TOOL_GUIDE = {
   look: "anything about what is on the user's screen: \"what am I looking at\", \"answer these questions\", \"what does this error say\", \"help me with this\". It answers in full in the Chat app; you say the gist",
-  info: "anything about the PC (CPU, GPU, temperatures, memory, network, what is running, uptime), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
+  info: "anything about the PC (CPU, GPU, temperatures, power draw, fan speeds, drives' temperature, space and health, memory, network, what is running, uptime; about sensors for any single reading), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
   panel: "this app itself: check for or install updates, switch forks, a theme, your own settings, reload; the PC's screensaver (\"screensaver\", \"go to sleep\" for the screens); Wallpaper Engine (next wallpaper, pause it)",
   layout: "what is on the screen and where: open an app, full screen (focus) and back, the Home layout (and saving a new one), show or hide widgets, put an app in a panel beside the widgets, resize, move, collapse, scenes, a sum on the calculator, pinning a window. The bracketed line says what is on screen now",
   youtube: "\"show me a video of...\", \"put on some...\" to watch: plays it, just the video, full screen unless asked otherwise; pause, resume, exit",
@@ -1766,6 +1821,7 @@ const TOOL_GUIDE = {
 const TOOL_EXAMPLES = [
   ["turn it down a bit", "volume {action: down}", "then say the new level it returned"],
   ["is something hogging my GPU?", "info {about: pc}", "then answer from the GPU numbers and the busiest programs"],
+  ["how fast are my fans spinning?", "info {about: sensors, find: fan}", "then the speeds it returned, and say so if some read 0 (stopped, or not readable)"],
   ["what am I looking at here?", "look {question: what am I looking at}", "then one or two sentences; the full answer is in the Chat app"],
   ["answer these questions for me", "look {question: answer the questions on screen}", "then say they're answered in the chat"],
   ["any updates?", "panel {action: check_updates}", "then say exactly what it returned"],
@@ -2054,7 +2110,7 @@ const MAX_SEARCHES = 2;
 // about something only a tool can know. If the step then ends without a tool
 // call, its text is dropped and the step runs again, once, with a reminder.
 const CLAIM = /^\W*(?:(?:ok(?:ay)?|sure|right|alright|got it|of course|certainly|no problem)\W+)?(?:i'?ll|i will|i'?m (?:going to|now|on it)|let me|on it|(?:checking|setting|turning|playing|opening|installing|restarting|reloading|switching|muting|unmuting|pausing|resuming|skipping|starting|looking|searching|dimming|changing|joining|leaving|answering|declining|updating|downloading)|i'?ve|i have|done|all set|(?:set|turned|muted|unmuted|paused|resumed|skipped|opened|installed|switched|started|joined|answered|declined|dimmed|changed|updated|downloaded|added|removed|saved|remembered))\b/i;
-const LIVE = /\b(updates?|version|cpu|gpu|vram|ram|temps?|temperatures?|hot|fps|battery|notifications?|texts?|messages?|calls?|calling|discord|channel|talking|volume|louder|quieter|mute|unmute|deafen|headphones?|headset|speakers?|mic|microphone|lights?|timers?|alarms?|weather|rain|forecast|play|pause|skip|song|playing|news|score|price|spent|usage|widgets?|theme|layout|scene|open|download|remember|weather)\b/i;
+const LIVE = /\b(updates?|version|cpu|gpu|vram|ram|temps?|temperatures?|hot|fps|fans?|rpm|watts?|power draw|voltages?|drives?|ssds?|nvme|disks?|storage|battery|notifications?|texts?|messages?|calls?|calling|discord|channel|talking|volume|louder|quieter|mute|unmute|deafen|headphones?|headset|speakers?|mic|microphone|lights?|timers?|alarms?|weather|rain|forecast|play|pause|skip|song|playing|news|score|price|spent|usage|widgets?|theme|layout|scene|open|download|remember|weather)\b/i;
 // "What is a GPU?" is a question about the world, not about this PC.
 const KNOWLEDGE = /^\W*(?:(?:hey |ok |okay )?jarvis\W+)?(?:what(?:'s| is| are) (?:a|an|the difference)\b|what does .+ mean|define\b|explain\b|how (?:does|do) (?:a|an)\b|tell me (?:a joke|about (?:a|an)\b))/i;
 const NUDGE = "(Reminder from Jarvis's own system, not from " + "the user: you answered without calling a tool. If this request needs one, and anything about the PC, the phone, Discord, sound, this app, music, the lights, timers, alarms, the weather or anything current does, call the right tool now and answer from its result. Never say you did, are doing or checked something you did not. If it truly needs no tool, give your answer again.)";

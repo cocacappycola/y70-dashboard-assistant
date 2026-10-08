@@ -56,6 +56,18 @@
     .cores i.hot { background: var(--p-accent, #42d6c3); }
     .cores-label { font-size: 9px; color: var(--p-muted, #6d7f7c); flex-shrink: 0; margin-top: -2px; }
 
+    /* LibreHardwareMonitor readings — power, hot spot, fans, drives. At most
+       two rows; whatever doesn't fit is in Jarvis's reach anyway. */
+    .sx-row { display: flex; flex-wrap: wrap; gap: 4px 5px; flex-shrink: 0; max-height: 40px; overflow: hidden; }
+    .sx-row:empty { display: none; }
+    .sx {
+      font-size: 10px; color: var(--p-sub, #93a8a4); white-space: nowrap;
+      background: var(--p-accent-soft, rgba(255,255,255,.07)); border-radius: 999px; padding: 2px 8px;
+    }
+    .sx b { color: var(--p-text, #eef5f3); font-weight: 600; }
+    .sx.warn { background: rgba(255, 170, 70, .16); }
+    .sx.warn b { color: #ffb454; }
+
     /* Network throughput */
     .net {
       display: flex; align-items: center; gap: 16px; flex-shrink: 0;
@@ -122,6 +134,7 @@
 
       <div class="cores" id="cores"></div>
       <div class="cores-label" id="cores-label"></div>
+      <div class="sx-row" id="sx"></div>
 
       <div class="net">
         <div class="net-one">
@@ -180,9 +193,10 @@
 
         set("t-cpu", d.cpu.pct == null ? null : Math.round(d.cpu.pct) + "%");
         set("t-cput", d.cpu.tempC == null ? null : Math.round(d.cpu.tempC) + "°");
-        set("t-gput", d.gpu ? Math.round(d.gpu.temp) + "°" : null);
-        set("t-gpu", d.gpu ? Math.round(d.gpu.util) + "%" : null);
-        set("t-vram", d.gpu ? gb(d.gpu.memUsed) : null);
+        set("t-gput", d.gpu && d.gpu.temp != null ? Math.round(d.gpu.temp) + "°" : null);
+        set("t-gpu", d.gpu && d.gpu.util != null ? Math.round(d.gpu.util) + "%" : null);
+        set("t-vram", d.gpu && d.gpu.memUsed != null ? gb(d.gpu.memUsed) : null);
+        drawSensors(d);
 
         if (d.net) {
           const dn = rate(d.net.downBps), up = rate(d.net.upBps);
@@ -264,6 +278,42 @@
         (busy ? busy + " over 70%" : "all under 70%");
     }
 
+    // ---- Sensors (LibreHardwareMonitor) -------------------------------------
+    // Drives go by size and kind ("4 TB NVMe"), which says more on a glance
+    // than a model number; amber when hot or nearly full.
+    function drawSensors(d) {
+      const out = [];
+      const chip = (label, value, warn, title) => out.push(
+        '<span class="sx' + (warn ? " warn" : "") + '"' + (title ? ' title="' + esc(title) + '"' : "") + ">" +
+        esc(label) + " <b>" + esc(value) + "</b></span>");
+      const c = d.cpu || {}, g = d.gpu || {};
+      if (c.powerW) chip("CPU", Math.round(c.powerW) + " W");
+      if (c.clockMHz) chip("Clock", (c.clockMHz / 1000).toFixed(1) + " GHz");
+      if (g.powerW != null) chip("GPU", Math.round(g.powerW) + " W");
+      if (g.hotspot != null) chip("Hot spot", Math.round(g.hotspot) + "°", g.hotspot >= 95);
+      if (g.memTemp != null) chip("VRAM", Math.round(g.memTemp) + "°", g.memTemp >= 95);
+      if (g.fans && g.fans.length) {
+        const rpm = Math.round(g.fans.reduce((s, f) => s + f.rpm, 0) / g.fans.length);
+        chip("GPU fans", rpm ? rpm + " rpm" : "off");
+      }
+      if (d.fans && d.fans.length) {
+        const spinning = d.fans.filter((f) => f.rpm > 0);
+        if (spinning.length) chip("Fans", spinning.length + " · " + Math.round(spinning.reduce((s, f) => s + f.rpm, 0) / spinning.length) + " rpm", false, d.fans.map((f) => f.name + " " + f.rpm + " rpm").join(", "));
+      }
+      for (const v of d.drives || []) {
+        if (v.tempC == null && v.usedPct == null) continue;
+        const size = v.totalGB >= 1000 ? Math.round(v.totalGB / 1000) + " TB" : v.totalGB ? v.totalGB + " GB" : "";
+        const kind = { nvme: "NVMe", ssd: "SSD", hdd: "HDD" }[v.type] || "Drive";
+        const hot = !!v.hot;
+        const full = v.usedPct != null && v.usedPct >= 95;
+        chip((size + " " + kind).trim(), (v.tempC != null ? Math.round(v.tempC) + "°" : "") + (full ? (v.tempC != null ? " · " : "") + Math.round(v.usedPct) + "% full" : ""),
+          hot || full, v.name + (v.freeGB != null ? " — " + v.freeGB + " GB free" : "") + (v.lifePct != null ? ", " + v.lifePct + "% life left" : ""));
+      }
+      const box = $("sx");
+      const html = out.join("");
+      if (box.innerHTML !== html) box.innerHTML = html;
+    }
+
     function set(id, v) {
       const el = $(id);
       el.textContent = v == null ? "—" : v;
@@ -299,8 +349,12 @@
       if (d.warming) { $("foot").textContent = "sampling…"; return; }
       // Windows publishes no CPU die temperature on most desktops (AMD in
       // particular), so say what would make the tile light up.
+      const l = d.lhm || {};
       if (d.cpu.tempC == null) {
-        $("foot").textContent = "CPU temp needs LibreHardwareMonitor running as admin · everything else is live";
+        $("foot").textContent = l.cpuBlocked
+          ? "CPU temp: LibreHardwareMonitor can't read the CPU — install PawnIO as admin, then restart it"
+          : !l.ok ? "CPU temp needs LibreHardwareMonitor with its web server on (port 8085)"
+          : "no CPU temperature sensor found · everything else is live";
       } else {
         $("foot").textContent = "CPU temp via " + d.cpu.tempSrc + " · live, nothing leaves this machine";
       }

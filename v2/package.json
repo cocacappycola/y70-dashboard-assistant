@@ -66,6 +66,7 @@
           "jarvis.css",
           "assistant-models.js",
           "govee.js",
+          "lhm.js",
           "tts-kokoro.py"
         ]
       },

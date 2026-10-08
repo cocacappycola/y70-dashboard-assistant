@@ -779,6 +779,9 @@ Live machine telemetry, refreshed every 2 seconds:
 - **CPU** — load percent (from `os.cpus()` deltas) and die temperature *if a
   source exists* — see the note below
 - **GPU** — temperature, utilisation and VRAM in use, via `nvidia-smi`
+- **Sensors row** (with LibreHardwareMonitor, below) — CPU and GPU power, GPU
+  hot spot and memory temperature, GPU and case fans, and every drive by size
+  and kind ("4 TB NVMe 51°"), amber when one is running hot or over 95% full
 - **Network** — real down/up throughput summed across adapters, from
   `Get-NetAdapterStatistics` byte counters
 - **Network activity** — every process holding an established connection to
@@ -794,14 +797,28 @@ Live machine telemetry, refreshed every 2 seconds:
 > beside it *are* network-specific and exact, and the down/up figures at the top
 > are true adapter throughput.
 
-**CPU temperature needs a helper.** Windows exposes no CPU die temperature on
-most desktops — on AMD in particular `MSAcpi_ThermalZoneTemperature` answers
-"Not supported", because reading it requires a kernel driver. Install
-[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
-(free) and leave it running **as administrator**; it publishes sensors over WMI
-and the widget picks them up on its own within a minute — no restart, no config.
-OpenHardwareMonitor and an ACPI thermal zone are also tried, in that order.
-Everything else on the widget works with nothing installed.
+**CPU temperature, fans and drives come from LibreHardwareMonitor.** Windows
+exposes no CPU die temperature on most desktops — on AMD in particular
+`MSAcpi_ThermalZoneTemperature` answers "Not supported", because reading it
+requires a kernel driver. To fill it in:
+
+1. Run [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
+   (free) **as administrator** — Options › *Run On Windows Startup* does that
+   for you every logon.
+2. Turn on its web server: Options › *Remote Web Server* › *Run* (port 8085,
+   no password). [`lhm.js`](lhm.js) reads `http://127.0.0.1:8085/data.json`
+   every 2 s while the widget is on; `Y70_LHM_URL` points it elsewhere.
+3. LHM 0.9.5 and later read the CPU and motherboard through the **PawnIO**
+   driver, a separate install (LHM offers it on first start, or
+   [pawnio.eu](https://pawnio.eu)). Without it LHM still runs and the GPU and
+   drives still read, but the CPU's temperature, power and clocks show 0 and the
+   motherboard shows no fans — the widget's footer says so when that's the case.
+
+`GET /api/sensors` returns every LHM sensor, grouped by hardware (`?find=fan`
+narrows it), and Jarvis reads the same through `info` (`pc` for the summary,
+`sensors` for any single reading). Without LHM the widget falls back to
+OpenHardwareMonitor's WMI and then an ACPI thermal zone, and everything else on
+it works with nothing installed.
 
 **How it works.** Spawning PowerShell per request would cost ~1s (module load +
 WMI connect), so [`server.js`](server.js) starts **one** long-lived sampler
@@ -1033,6 +1050,7 @@ wscript "autostart-hidden.vbs" 0
 | `app.js`     | Auth, Web Playback SDK, API calls, rendering |
 | `theme.js`   | Shared palette — presets, colour maths, CSS variables for every frame |
 | `pcstats.ps1` | Long-lived telemetry sampler feeding `/api/pcstats` |
+| `lhm.js` | LibreHardwareMonitor's sensors, from its web server, for `/api/pcstats`, `/api/sensors` and Jarvis |
 | `weather-bg.js` | Reactive sky canvas, shared by the weather app and widget |
 | `syscontrol.ps1` | Resident helper: Core Audio + Windows media session |
 | `discord.js` | Discord RPC over the local named pipe |
