@@ -187,6 +187,52 @@ itself after a look; he says the gist out loud. The log is
 40), both in the data folder, never served except through
 `/api/jarvis/capture/...` on 127.0.0.1. Clear (tap twice) deletes both.
 
+### Thinking hard: the big model
+
+"Jarvis, think hard about…" (or any question the 9B judges needs real
+thought) hands it to **`jarvis-flash`**: Qwen3.8-Flash-Next, a 125B mixture of
+experts with 6B awake per token, UD-IQ3_XXS (82 GB) in
+`E:\OLLAMAMODEL2026\gguf\qwen3.8-flash-next`. It works in the background; the
+answer opens in Chat ("Thought it through", Markdown with tables and code) and
+he reads a one-line summary out. **think_hard** (`assistant.js`, "think hard"):
+
+- **Swap, not share.** It only runs at speed with the RAM to itself. Measured
+  on this PC (CUDA): 21 tok/s alone, 5–10 beside the 9B or the 4B. So the
+  turn ends at once with "On it…", the router swaps it in, and anything asked
+  meanwhile gets an instant "still thinking about … say 'stop thinking'"
+  without a model. Stop thinking cancels and unloads it (otherwise the next
+  question waited 257 s for the abandoned load). It won't start, and stops,
+  when a game is in front.
+- **Effort is yours, not the model's:** medium by default; "quickly" is low,
+  "as hard as you can" / "thoroughly" / "take your time" is high (the 9B
+  asked for high every time). Reasoning is capped per effort (1,000 / 2,500 /
+  5,000 tokens) **by Jarvis**: llama.cpp's own reasoning budget only works for
+  templates whose thinking tags it knows, and this one's it does not (asked
+  for 2,500 it reasoned 5,000; uncapped, 10,000 and never answered). So it runs
+  as a raw `/completion` of the template's own prompt (`/apply-template`);
+  when the budget is spent it closes the thinking with a nudge and continues,
+  reusing the prompt already read. Answers are capped at ~1,500 tokens.
+- **Follow-ups** go back through think_hard with the earlier answers attached:
+  Jarvis's own prompt (every tool and the memory, ~7,500 tokens) would take the
+  big model ~90 s just to read.
+
+**Where the time goes on 48 GB of RAM** (measured, one medium think: ~15 min):
+loading 3–5 min (llama.cpp memory-maps the model and Windows faults it in at
+~83 MB/s from a 4 GB/s drive), reading the question at ~12 tok/s (each
+distinct word needs a row of the 29 GB per-layer table, which does not fit in
+RAM beside the experts), then reasoning and writing at ~20 tok/s. Pre-reading
+the weights at full speed alongside the load (`warmGguf` in
+`assistant-models.js`) made it slower here — 53 GB through a ~40 GB cache — so
+it only switches on from 80 GB of RAM. With 96 GB the experts and much of the
+table stay cached and it should come down to a few minutes.
+
+Router: `jarvis-llm.bat` runs the **CUDA** build of llama.cpp
+(`E:\OLLAMAMODEL2026\llama-cuda`, b11518, CUDA 12.4: the 9B writes 89 tok/s
+against Vulkan's 74). The 9B and 4B load with `load-mode = none` (read at full
+speed, not memory-mapped, which took 80+ s once the big model had pushed them
+out of the file cache). Backups of the pre-CUDA bat and ini are in
+`E:\OLLAMAMODEL2026\gguf\backups`.
+
 ### Schedules, the screensaver, Wallpaper Engine
 
 **Schedules** ride on alarms and timers (the island already shows and rings

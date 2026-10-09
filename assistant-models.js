@@ -328,4 +328,79 @@ function register(id, settings) {
   return { ok: true, id: sec, ini };
 }
 
-module.exports = { find, plan, start, list, summary, register, readIni, modelsDir, iniPath, GB };
+// ---- warming a model file -------------------------------------------------
+// llama.cpp memory-maps a model and, on Windows, faults it in a page at a time:
+// measured at ~83 MB/s from a drive that reads 4 GB/s, which made a 125B load
+// take 3-5 minutes. Reading the weights alongside the load, in big sequential
+// blocks, puts them in the file cache ahead of it. Tensors matching `skip` (a
+// per-layer embedding table bigger than the RAM left over) are not read.
+function ggufTensors(file) {
+  const fd = fs.openSync(file, "r");
+  const buf = Buffer.alloc(64 << 20);
+  fs.readSync(fd, buf, 0, buf.length, 0);
+  fs.closeSync(fd);
+  if (buf.toString("ascii", 0, 4) !== "GGUF") return [];
+  let o = 8;
+  const u32 = () => { const v = buf.readUInt32LE(o); o += 4; return v; };
+  const u64 = () => { const v = Number(buf.readBigUInt64LE(o)); o += 8; return v; };
+  const str = () => { const l = u64(); const s = buf.toString("utf8", o, o + l); o += l; return s; };
+  const skipKv = (t) => {
+    const size = { 0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8 }[t];
+    if (size) { o += size; return; }
+    if (t === 8) { str(); return; }
+    if (t === 9) { const at = u32(); const len = u64(); for (let i = 0; i < len; i++) skipKv(at); return; }
+    throw new Error("GGUF value type " + t);
+  };
+  const nt = u64(), nkv = u64();
+  let align = 32;
+  for (let i = 0; i < nkv; i++) {
+    const k = str(); const t = u32();
+    if (k === "general.alignment" && t === 4) align = buf.readUInt32LE(o);
+    skipKv(t);
+  }
+  const ts = [];
+  for (let i = 0; i < nt; i++) {
+    const name = str(); const nd = u32();
+    for (let d = 0; d < nd; d++) u64();
+    u32();
+    ts.push({ name, off: u64() });
+  }
+  const data = Math.ceil(o / align) * align;
+  const size = fs.statSync(file).size;
+  ts.sort((a, b) => a.off - b.off);
+  return ts.map((t, i) => ({ name: t.name, start: data + t.off, end: i + 1 < ts.length ? data + ts[i + 1].off : size }));
+}
+
+// All shards of a split model ("...-00001-of-00003.gguf"), read in parallel.
+// Resolves with { gb, seconds } (or { error }); `signal` stops it early.
+async function warmGguf(first, skip, signal) {
+  const t0 = Date.now();
+  try {
+    const m = /^(.*-)(\d{5})-of-(\d{5})\.gguf$/i.exec(first);
+    const files = m ? Array.from({ length: +m[3] }, (_, i) => m[1] + String(i + 1).padStart(5, "0") + "-of-" + m[3] + ".gguf") : [first];
+    const BLOCK = 16 << 20;
+    let total = 0;
+    await Promise.all(files.map(async (f) => {
+      const ranges = [];
+      for (const t of ggufTensors(f)) {
+        if (skip && skip.test(t.name)) continue;
+        const last = ranges[ranges.length - 1];
+        if (last && last[1] === t.start) last[1] = t.end; else ranges.push([t.start, t.end]);
+      }
+      const fh = await fs.promises.open(f, "r");
+      const buf = Buffer.allocUnsafe(BLOCK);
+      try {
+        for (const [s, e] of ranges) {
+          for (let p = s; p < e; p += BLOCK) {
+            if (signal && signal.aborted) return;
+            await fh.read(buf, 0, Math.min(BLOCK, e - p), p);
+            total += Math.min(BLOCK, e - p);
+          }
+        }
+      } finally { await fh.close(); }
+    }));
+    return { gb: +(total / 1e9).toFixed(1), seconds: +((Date.now() - t0) / 1000).toFixed(1) };
+  } catch (e) { return { error: e.message }; }
+}
+
+module.exports = { find, plan, start, list, summary, register, readIni, modelsDir, iniPath, GB, warmGguf };

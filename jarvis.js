@@ -1704,6 +1704,50 @@
     });
   }
 
+  // --------------------------------------------------------- think hard -----
+  // The big model works in the background and reports here. When it is done
+  // he reads the summary out, once he is free (not listening, thinking or
+  // mid-sentence), and the full answer opens in the Chat app.
+  // "Jarvis, think hard about this: should I…" -> "should I…"
+  const bareQ = (q) => String(q || "").replace(/^(?:hey |ok |okay )?jarvis[,\s]+/i, "").replace(/^think (?:really )?hard(?: about(?: this)?)?[:,\s]*/i, "").trim();
+  const shortQ = (q) => { q = bareQ(q); return q.length > 60 ? q.slice(0, 57).replace(/\s+\S*$/, "") + "…" : q; };
+  function onThink(ev) {
+    if (JST) JST.think = { busy: !!ev.busy, question: ev.question, phase: ev.phase, seconds: ev.seconds };
+    if (ev.state === "progress") return;
+    if (ev.state === "started") {
+      J.note = "Thinking hard about “" + shortQ(ev.question) + "”. I'll say when it's ready.";
+      if (J.mode === "idle") renderJarvis();
+      return;
+    }
+    if (ev.state === "cancelled" || ev.state === "failed") {
+      J.note = ev.state === "failed"
+        ? "Couldn't finish thinking about “" + shortQ(ev.question) + "”: " + (ev.error || "unknown error") + "."
+        : "Stopped thinking about “" + shortQ(ev.question) + "”" + (ev.why && ev.why !== "asked" ? " (" + ev.why + ")" : "") + ".";
+      openCard(); renderAll(); scheduleClose(10000);
+      return;
+    }
+    if (ev.state !== "done") return;
+    // A short question is worth naming; a long one is just "it".
+    const bare = bareQ(ev.question).replace(/[?.!]+$/, "");
+    const say = (bare && bare.length <= 50 ? "I've thought about " + bare.charAt(0).toLowerCase() + bare.slice(1) + ". " : "I've thought it through. ") +
+      (ev.spoken || "The answer is in the chat.");
+    let tries = 0;
+    const deliver = () => {
+      // Wait for a quiet moment rather than talking over a conversation.
+      if (J.mode !== "idle" || J.ctl) { if (++tries < 80) setTimeout(deliver, 1500); return; }
+      speech.reset();
+      J.heard = "Think hard: " + shortQ(ev.question);
+      J.reply = say; J.cards = []; cardsSig = ""; J.status = "";
+      J.note = "Thought for " + ev.seconds + " s · the full answer is in Chat.";
+      chime.done();
+      openCard(); renderAll();
+      if (APPS.chat && !(JST && JST.game && JST.game.on)) setApp("chat");
+      if (JS && JS.speak) { speech.enqueue(say); speech.end(); }
+      else scheduleClose(12000);
+    };
+    deliver();
+  }
+
   // -------------------------------------------------------------- events ----
   let es = null;
   function connect() {
@@ -1789,6 +1833,9 @@
         return;
       case "memory":
         if (jarvisViewOpen()) loadFacts();
+        return;
+      case "think":
+        onThink(ev);
         return;
       case "downloads":
         J.downloads = ev.downloads || [];

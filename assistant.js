@@ -23,6 +23,7 @@
 //  does the work and posts the results back, and the loop carries on.
 // ============================================================================
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawn, execFile } = require("child_process");
 const web = require("./assistant-web");
@@ -43,6 +44,7 @@ const DEFAULTS = {
   claudeModel: "claude-haiku-4-5",
   localUrl: "http://127.0.0.1:8081",
   localModel: "jarvis-9b",          // any [section] of jarvis-models.ini
+  thinkModel: "jarvis-flash",       // the big model "think hard" hands questions to
   autoGameModel: true,              // use the 4B while a game is in front
   localBat: "",                     // jarvis-llm.bat, so the panel can start it
   wake: true,
@@ -87,6 +89,7 @@ function saveSettings(patch) {
   if (!["claude", "local", "auto"].includes(next.provider)) next.provider = DEFAULTS.provider;
   if (!CLAUDE_MODELS.includes(next.claudeModel)) next.claudeModel = DEFAULTS.claudeModel;
   if (!/^[\w.\-]{1,64}$/.test(String(next.localModel || ""))) next.localModel = DEFAULTS.localModel;
+  if (!/^[\w.\-]{1,64}$/.test(String(next.thinkModel || ""))) next.thinkModel = DEFAULTS.thinkModel;
   next.sensitivity = Math.max(0, Math.min(1, Number(next.sensitivity) || 0.5));
   next.endSilence = Math.round(Math.max(0.5, Math.min(4, Number(next.endSilence) || 1.5)) * 4) / 4;
   next.rate = Math.max(0.6, Math.min(2, Number(next.rate) || 1));
@@ -525,6 +528,7 @@ function status() {
       up: local.up, checkedAt: local.checkedAt, model: localModelNow(), loaded: local.loaded,
       models: localModels(), needsRestart: local.needsRestart,
     },
+    think: { ...thinkState(), model: settings.thinkModel, ready: thinkReady() },
     memory: { mode: graphMode() ? "graph" : "local", server: memoryServer.up },
     downloads: models.list(),
     lights: govee.status(),
@@ -573,12 +577,18 @@ function localModels() {
 // A 14B-and-up model gets every tool and the whole memory graph; small ones a
 // short list, which they choose from far more reliably.
 function isBig(id, file) {
+  if (id === settings.thinkModel) return true;
   const m = (String(id) + " " + String(file || "")).match(/(\d+(?:\.\d+)?)\s*b\b/i);
   return !!m && Number(m[1]) >= 14;
 }
 
+// While the big model is thinking it is the one loaded (questions meanwhile get
+// an instant "still thinking"; see handleTurn). The next question after it
+// finishes swaps the everyday model back in.
 function localModelNow() {
-  return settings.autoGameModel && game.on ? "jarvis-4b" : settings.localModel;
+  if (settings.autoGameModel && game.on) return "jarvis-4b";
+  if (think.job && !think.job.pending && thinkReady()) return settings.thinkModel;
+  return settings.localModel;
 }
 
 // A game just came to the front. If the big model is sitting in VRAM, hand it
@@ -586,6 +596,8 @@ function localModelNow() {
 async function onGameChange() {
   broadcast({ type: "status", status: status() });
   if (!settings.autoGameModel || !game.on) return;
+  // The game wants the memory the big model is using: stop thinking.
+  if (think.job) thinkCancel("a game started");
   if (!(await localProbe(true))) return;
   if (local.loaded && local.loaded !== "jarvis-4b") {
     try {
@@ -652,6 +664,273 @@ async function localRestart() {
   const r = localStart();
   local.needsRestart = false;
   return r;
+}
+
+// ------------------------------------------------------------- think hard --
+//  A hard question goes to the big model (jarvis-flash: Qwen3.8-Flash-Next),
+//  in the background. It is a 125B mixture of experts that only runs at speed
+//  with the RAM to itself (measured on this PC: 21 tok/s alone, 5-10 beside the
+//  9B), so the router swaps it in rather than running it next to the 9B, and
+//  while it works, questions get an instant "still thinking" instead of
+//  queueing behind it. The answer goes to the Chat app and is read out.
+//  Follow-ups go back through think_hard with the earlier answers attached:
+//  Jarvis's own prompt (every tool, the memory: ~7,500 tokens) would take the
+//  big model about 90 s just to read, where a think prompt is a fraction.
+const THINK_MAX_MS = 20 * 60 * 1000;
+// Reasoning tokens allowed per effort (~20 tok/s on this PC: ~50 s / 2 / 4 min),
+// and the answer after it (~1,500 tokens is ~75 s, plenty for ~400 words).
+const THINK_BUDGET = { low: 1000, medium: 2500, high: 5000 };
+const THINK_ANSWER_TOKENS = 1500;
+const THINK_WARM_MIN_RAM = 80 * 2 ** 30;   // pre-reading the big model pays off from ~80 GB of RAM
+const THINK_ENOUGH = "\n\nI have thought this through enough. Time to write the answer.\n";
+
+// One raw completion from the router, streamed; `onPiece` gets each bit of text.
+async function thinkComplete(base, prompt, nPredict, signal, onPiece) {
+  const res = await fetch(base + "/completion", {
+    method: "POST", headers: { "Content-Type": "application/json" }, signal,
+    body: JSON.stringify({ model: settings.thinkModel, prompt, n_predict: nPredict, stream: true, cache_prompt: true, stop: ["<|im_end|>", "<|endoftext|>"] }),
+  });
+  if (!res.ok) throw new Error("the model server said " + res.status + ": " + (await res.text().catch(() => "")).slice(0, 160));
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line.startsWith("data:")) continue;
+      let j;
+      try { j = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+      if (j.error) throw new Error(j.error.message || "model error");
+      if (j.content) onPiece(j.content);
+      if (j.stop) return;
+    }
+  }
+}
+const think = { job: null, seq: 0 };
+
+function thinkReady() {
+  return models.readIni(settings).some((m) => m.id === settings.thinkModel);
+}
+
+function thinkState() {
+  const j = think.job;
+  if (!j) return { busy: false };
+  return { busy: true, question: j.asked || j.question, phase: j.phase, seconds: Math.round((Date.now() - j.started) / 1000), tokens: j.tokens };
+}
+
+function thinkBroadcast(state, extra) {
+  broadcast({ type: "think", state, ...thinkState(), ...(extra || {}) });
+}
+
+const PHASE_SAID = { waking: "waking the big model up", thinking: "working through it", writing: "writing the answer" };
+
+// What Jarvis says to anything asked while the big model is busy.
+function thinkBusyReply(text) {
+  const j = think.job;
+  if (/\b(stop|cancel|abort|quit|end)\b[^.?!]*\bthink|\bnever ?mind\b|\bforget (about )?it\b|\bcancel (it|that)\b/i.test(text)) {
+    thinkCancel("asked");
+    return "Okay, I've stopped thinking about that.";
+  }
+  const secs = Math.round((Date.now() - j.started) / 1000);
+  const said = (j.asked || j.question).replace(/^(?:hey |ok |okay )?jarvis[,\s]+/i, "").replace(/^think (?:really )?hard(?: about(?: this)?)?[:,\s]*/i, "");
+  const q = said.length > 70 ? said.slice(0, 67).replace(/\s+\S*$/, "") + "…" : said;
+  return "Still thinking about \"" + q + "\": " + secs + " seconds in, " + (PHASE_SAID[j.phase] || "on it") +
+    ". I'll tell you when it's ready. Say \"stop thinking\" to cancel.";
+}
+
+function thinkCancel(why) {
+  const j = think.job;
+  if (!j) return false;
+  j.cancelled = why || "cancelled";
+  try { j.ctl.abort(); } catch (e) {}
+  // Not started yet: there is no run to report it, so do it here.
+  if (j.pending) {
+    think.job = null;
+    thinkBroadcast("cancelled", { question: j.asked || j.question, why: j.cancelled });
+    return true;
+  }
+  // Aborting the request does not stop the router loading the model, and the
+  // next question would wait minutes for that load to finish (measured: 257 s).
+  {
+    fetch(settings.localUrl.replace(/\/+$/, "") + "/models/unload", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: settings.thinkModel }),
+    }).then(() => { if (local.loaded === settings.thinkModel) local.loaded = null; }).catch(() => {});
+  }
+  return true;
+}
+
+// The last few exchanges, so the big model knows what "it" and "that" are,
+// and its own recent answers in full-ish, so a follow-up keeps the thread.
+// Kept short on purpose: every distinct word costs the big model a read from
+// disk on this PC (its 29 GB per-layer table does not fit in RAM), measured at
+// ~12 tokens/s for a real 1,600-token prompt.
+function thinkContext() {
+  const recent = loadChat().filter((e) => Date.now() - e.at < 30 * 60 * 1000).slice(-2);
+  if (!recent.length) return "";
+  return "\n\nThe conversation just before this (for context):\n" + recent.map((e) => e.conv === "think"
+    ? "Earlier deep-think question: " + String(e.heard || "").replace(/^Think hard:\s*/, "").slice(0, 400) + "\nYour answer then:\n" + String(e.reply || "").slice(0, 1500)
+    : "User: " + String(e.heard || "").slice(0, 300) + "\nJarvis: " + String(e.reply || "").slice(0, 400)).join("\n\n");
+}
+
+function thinkSystem() {
+  const who = settings.name || "the user";
+  const now = new Date();
+  const graph = graphSummary();
+  return [
+    "You are the deep-thinking side of Jarvis, the voice assistant on " + who + "'s PC. A faster model talks with " + who +
+      " and hands you the questions that need real thought. Think each one through properly, then answer it well:",
+    "- Lead with the answer or recommendation, then the reasoning that supports it.",
+    "- Keep it tight: about 400 words unless the question truly needs more (code can run longer). Every line should earn its place.",
+    "- Use Markdown: short headings, lists, tables or code blocks where they help. No filler, no restating the question.",
+    "- Use the facts you are given (hardware, numbers) exactly; do not round them off or invent others.",
+    "- Be concrete. Where something is uncertain, say what it depends on.",
+    "- You have no tools and cannot look anything up. Where current facts would matter, say so.",
+    "End with one last line that starts with \"SPOKEN:\" and gives one or two plain sentences summing up the answer, to be read aloud.",
+    "",
+    "It is " + now.toLocaleString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" }) + ".",
+    graph ? "\nWhat the shared memory knows about " + who + " and their things:\n" + graph.slice(0, 1500) : "",
+  ].join("\n");
+}
+
+async function thinkStart(a) {
+  // Every word costs the big model a read from disk here (see thinkContext),
+  // and the 9B tends to write a page where a paragraph does.
+  const question = String(a.question || "").trim().slice(0, 2500);
+  if (!question) return ["think_hard needs the question.", true];
+  if (game.on) return ["Not while a game is running: the big model needs the memory the game is using. It can think about this once you're out of the game.", true];
+  if (!thinkReady()) return ["The big model (" + settings.thinkModel + ") isn't in jarvis-models.ini yet, or the local server hasn't been restarted since it was added.", true];
+  // The same step asking twice (the 9B does) is one question, not an error.
+  if (think.job && think.job.pending) return ["Already handed over; nothing more to do."];
+  if (think.job) return ["Already thinking about: \"" + think.job.question.slice(0, 120) + "\". One at a time; it can take the next one when that's done.", true];
+  // Claimed before anything is awaited, so two calls at once cannot both start.
+  // Pending until the turn that asked is over: the router holds one model, so
+  // starting now would pull the big model in under the turn's own last step.
+  const job = { id: ++think.seq, question, requested: a.effort, effort: "medium", started: Date.now(), phase: "waking", tokens: 0, ctl: new AbortController(), cancelled: null, pending: true };
+  think.job = job;
+  if (!(await localProbe(true))) {
+    if (think.job === job) think.job = null;
+    return ["The local model server isn't running, so the big model can't start.", true];
+  }
+  setTimeout(thinkGo, 20000);          // asked from outside a turn (a schedule)
+  return ["Started: the big model is thinking about it in the background. The full answer will open in the Chat app and be read out when it's ready."];
+}
+
+// Starts the job the turn queued, once that turn needs no more model steps.
+function thinkGo() {
+  const job = think.job;
+  if (!job || !job.pending) return;
+  job.pending = false;
+  job.started = Date.now();
+  job.effort = thinkEffort(job.requested, job.asked || job.question);
+  thinkRun(job).catch(() => {});
+}
+
+// The user's words decide, not the model's guess: asked to "think hard", the
+// 9B picked "high" every time, which is several minutes more reasoning.
+function thinkEffort(requested, said) {
+  if (/\b(as (hard|long|much) as (you can|possible)|really really|take (your|all the|the) time|max(imum)?( effort)?|deep(ly)?|thoroughly|no rush)\b/i.test(said)) return "high";
+  if (/\b(quick(ly)?|briefly|fast|rough(ly)?|short)\b/i.test(said) || requested === "low") return "low";
+  return "medium";
+}
+const THINK_ACK = "On it. I'll let you know when I've thought it through.";
+const THINK_WORDS = /\b(think|thinking)\s+(really\s+)?(hard|deep(ly)?|carefully|it through|this through)\b|\btake (your|the|all the) time\b|\bdeep[- ]think\b/i;
+
+async function thinkRun(job) {
+  thinkBroadcast("started");
+  const base = settings.localUrl.replace(/\/+$/, "");
+  // Not loaded yet: read its weights into the file cache alongside the load
+  // (see models.warmGguf), skipping the per-layer table. Only with RAM to hold
+  // them: on 48 GB it pushed 53 GB through a ~40 GB cache, evicting what the
+  // load had just read, and the whole think took longer (measured).
+  const entry = models.readIni(settings).find((m) => m.id === settings.thinkModel);
+  if (entry && entry.file && local.loaded !== settings.thinkModel && os.totalmem() >= THINK_WARM_MIN_RAM) {
+    models.warmGguf(entry.file, /per_layer/i, job.ctl.signal).then((w) => { job.warm = w; });
+  }
+  const timer = setTimeout(() => thinkCancel("took longer than " + THINK_MAX_MS / 60000 + " minutes"), THINK_MAX_MS);
+  const tick = setInterval(() => thinkBroadcast("progress"), 5000);
+  let content = "", reasoning = 0, error = null;
+  try {
+    // The reasoning budget is kept here, not by llama-server: its budget only
+    // works for templates whose thinking tags it knows, and this one's are not
+    // (measured: asked for 2,500 it reasoned 5,000; uncapped, 10,000 and never
+    // answered). So: the prompt exactly as the model's template writes it,
+    // which already opens <think>; raw completion; when the budget is spent,
+    // stop, close the thinking with a nudge, and continue into the answer,
+    // reusing the prompt it has already read.
+    const budget = THINK_BUDGET[job.effort];
+    const messages = [{ role: "system", content: thinkSystem() }, { role: "user", content: job.question + thinkContext() }];
+    const tr = await fetch(base + "/apply-template", {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal: job.ctl.signal,
+      body: JSON.stringify({ model: settings.thinkModel, messages, chat_template_kwargs: { reasoning_effort: job.effort, enable_thinking: true } }),
+    });
+    if (!tr.ok) throw new Error("the model server said " + tr.status + ": " + (await tr.text().catch(() => "")).slice(0, 160));
+    const prompt = (await tr.json()).prompt || "";
+    let inThink = /<think>\s*$/.test(prompt);
+    let thought = "";
+
+    // First pass: think (and with luck answer) until the budget runs out.
+    const pass1 = new AbortController();
+    const onAbort = () => pass1.abort();
+    job.ctl.signal.addEventListener("abort", onAbort);
+    try {
+      await thinkComplete(base, prompt, budget + THINK_ANSWER_TOKENS, pass1.signal, (piece) => {
+        job.tokens++;
+        if (inThink) {
+          thought += piece;
+          const end = thought.indexOf("</think>");
+          if (end >= 0) { content += thought.slice(end + 8).replace(/^\s+/, ""); thought = thought.slice(0, end); inThink = false; job.phase = "writing"; return; }
+          reasoning++; job.phase = "thinking";
+          if (reasoning >= budget) pass1.abort();
+        } else {
+          content += piece; job.phase = "writing";
+        }
+      });
+    } catch (e) {
+      if (!(e.name === "AbortError" && !job.ctl.signal.aborted)) throw e;
+    } finally { job.ctl.signal.removeEventListener("abort", onAbort); }
+    local.loaded = settings.thinkModel;
+
+    // Budget spent mid-thought: close it and write the answer.
+    if (inThink) {
+      job.phase = "writing";
+      const prompt2 = prompt + thought.replace(/\s+$/, "") + THINK_ENOUGH + "</think>\n\n";
+      await thinkComplete(base, prompt2, THINK_ANSWER_TOKENS, job.ctl.signal, (piece) => { job.tokens++; content += piece; });
+    }
+  } catch (e) {
+    error = job.cancelled ? null : (e.name === "AbortError" ? "it was stopped" : e.message);
+  } finally {
+    clearTimeout(timer);
+    clearInterval(tick);
+  }
+  const seconds = Math.round((Date.now() - job.started) / 1000);
+  think.job = null;
+  if (job.cancelled) { thinkBroadcast("cancelled", { question: job.asked || job.question, why: job.cancelled }); return; }
+  if (error || !content.trim()) { thinkBroadcast("failed", { question: job.asked || job.question, error: error || "it came back empty" }); return; }
+
+  // The last "SPOKEN:" line is the bit to read out; the rest is the answer.
+  const lines = content.split("\n");
+  let at = -1;
+  for (let k = lines.length - 1; k >= 0; k--) if (/^\s*[*_]*SPOKEN[*_]*\s*:/.test(lines[k])) { at = k; break; }
+  // No SPOKEN line (cut off): the first two sentences of the first paragraph.
+  const firstPara = () => {
+    const para = lines.map((l) => l.trim()).find((l) => l && !/^(#|\||---|```|[-*•]\s|\d+[.)]\s)/.test(l) && l.replace(/[*_`]/g, "").length > 30) || "";
+    return (para.replace(/[*_`]/g, "").match(/[^.!?]+[.!?]+/g) || [para]).slice(0, 2).join(" ").trim().slice(0, 300);
+  };
+  const spoken = at >= 0
+    ? lines.slice(at).join(" ").replace(/^\s*[*_]*SPOKEN[*_]*\s*:\s*/, "").replace(/[*_`#]/g, "").trim()
+    : firstPara();
+  const answer = (at >= 0 ? lines.slice(0, at).join("\n") : content).trim();
+  addChat({
+    id: "t" + Date.now().toString(36), at: Date.now(), conv: "think",
+    heard: job.asked || "Think hard: " + job.question, reply: answer, tools: ["think_hard"], cards: [], model: settings.thinkModel,
+    think: { seconds, tokens: job.tokens, reasoningTokens: reasoning, effort: job.effort, warm: job.warm || null },
+  });
+  thinkBroadcast("done", { question: job.asked || job.question, spoken, seconds });
 }
 
 // ------------------------------------------------------------------ memory --
@@ -1009,6 +1288,15 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: { question: { type: "string" }, target: { type: "string", enum: ["window", "screen"] } },
+      required: ["question"],
+    },
+  },
+  {
+    name: "think_hard", where: "server", core: true,
+    description: "Hand a hard question to Jarvis's big model, which is far smarter than you but slower: hard reasoning, maths, code, planning, comparisons and decisions, explaining something properly, or anything the user asks you to \"think hard\", \"really think\" or \"take your time\" about. It works in the background (several minutes, most of it loading); the full answer opens in the Chat app and is read out when it is ready. question: the whole question with everything it needs, as short as it can be while complete, since it cannot see this conversation (include what \"it\" or \"that\" refers to). effort: leave it out (medium) unless the user asks for a quick think (low) or for as much thought as possible (high).",
+    input_schema: {
+      type: "object",
+      properties: { question: { type: "string" }, effort: { type: "string", enum: ["low", "medium", "high"] } },
       required: ["question"],
     },
   },
@@ -1738,6 +2026,7 @@ async function runServerTool(name, input, emit) {
       if (a.action === "read") return [numbered(text) || "(the notes are empty)"];
       return [r.msg + "\nThe notes now:\n" + (numbered(text) || "(empty)")];
     }
+    case "think_hard": return thinkStart(a);
     case "info": {
       const r = await info(String(a.about || "everything"), a);
       return [JSON.stringify(r), !!(r && r.error)];
@@ -1794,6 +2083,7 @@ function who() { return settings.name || "the user"; }
 // from the tools this model actually has — then shows it done.
 const TOOL_GUIDE = {
   look: "anything about what is on the user's screen: \"what am I looking at\", \"answer these questions\", \"what does this error say\", \"help me with this\". It answers in full in the Chat app; you say the gist",
+  think_hard: "a question that needs real thought (hard reasoning, maths, code, planning, a decision, a proper explanation), or when asked to think hard or take your time: the big model works on it and the answer comes later",
   info: "anything about the PC (CPU, GPU, temperatures, power draw, fan speeds, drives' temperature, space and health, memory, network, what is running, uptime; about sensors for any single reading), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
   panel: "this app itself: check for or install updates, switch forks, a theme, your own settings, reload; the PC's screensaver (\"screensaver\", \"go to sleep\" for the screens); Wallpaper Engine (next wallpaper, pause it)",
   layout: "what is on the screen and where: open an app, full screen (focus) and back, the Home layout (and saving a new one), show or hide widgets, put an app in a panel beside the widgets, resize, move, collapse, scenes, a sum on the calculator, pinning a window. The bracketed line says what is on screen now",
@@ -1821,6 +2111,7 @@ const TOOL_GUIDE = {
 const TOOL_EXAMPLES = [
   ["turn it down a bit", "volume {action: down}", "then say the new level it returned"],
   ["is something hogging my GPU?", "info {about: pc}", "then answer from the GPU numbers and the busiest programs"],
+  ["think hard about whether I should get 96 GB of RAM or a second GPU for local AI", "think_hard {question: \"Should Cappy upgrade to 96 GB of RAM or add a second GPU (RTX 3070 Ti) for running local AI models? ...everything relevant you know...\"}", "then just \"On it, I'll let you know.\""],
   ["how fast are my fans spinning?", "info {about: sensors, find: fan}", "then the speeds it returned, and say so if some read 0 (stopped, or not readable)"],
   ["what am I looking at here?", "look {question: what am I looking at}", "then one or two sentences; the full answer is in the Chat app"],
   ["answer these questions for me", "look {question: answer the questions on screen}", "then say they're answered in the chat"],
@@ -2136,6 +2427,8 @@ function honestEmit(emit, hold) {
     // what there is.
     settle() { if (!decided && !hold.all && CLAIM.test(buf.trim())) hold.all = true; },
     release() { if (buf) emit({ type: "text", delta: buf }); buf = ""; decided = true; flushed = true; },
+    // What was held is not said at all (the step handed the question on).
+    drop() { buf = ""; decided = true; },
     get flushed() { return flushed; },
   };
 }
@@ -2160,10 +2453,17 @@ async function runLoop(conv, emit, signal) {
     // Watch only before the first tool of the turn, and only once.
     const watch = !last && !conv.nudged && conv.log.tools.length === 0;
     const heard = conv.log.heard || "";
-    const hold = { claims: watch, all: watch && LIVE.test(heard) && !KNOWLEDGE.test(heard) };
+    // Asked to think hard, the 9B tends to start answering itself before it
+    // hands over: hold its words, and drop them if it does hand over.
+    const thinkAsk = step === 0 && THINK_WORDS.test(heard);
+    const hold = { claims: watch, all: (watch && LIVE.test(heard) && !KNOWLEDGE.test(heard)) || thinkAsk };
     const h = honestEmit(emit, hold);
     const r = provider === "claude" ? await claudeStep(conv, h.emit, signal, last) : await localStep(conv, h.emit, signal, last);
     const usedTool = r.content.some((b) => b.type === "tool_use");
+    if (r.content.some((b) => b.type === "tool_use" && b.name === "think_hard")) {
+      r.content = r.content.filter((b) => b.type !== "text");
+      h.settle(); h.drop();
+    }
     h.settle();
     if (watch && !usedTool && hold.all && !h.flushed && r.stop !== "refusal") {
       // Claimed or answered without a tool: drop it, unheard, and try again.
@@ -2219,6 +2519,21 @@ async function runLoop(conv, emit, signal) {
       emit({ type: "tool", id: u.id, name: u.name, status: "done", ok: !isErr });
       return { type: "tool_result", tool_use_id: u.id, content: String(out == null ? "" : out), ...(isErr ? { is_error: true } : {}) };
     }));
+
+    // Handed to the big model: that is the answer for now. Ending here, rather
+    // than asking the model for an "on it", keeps the router free for it.
+    const handed = serverUses.some((u, k) => u.name === "think_hard" && !results[k].is_error);
+    // What the user said, for "still thinking about…" and the Chat app; the
+    // model's own write-up of the question is what the big model gets.
+    if (handed && think.job && think.job.pending && conv.log.heard) think.job.asked = conv.log.heard.slice(0, 300);
+    if (handed && !clientUses.length) {
+      conv.messages.push({ role: "user", content: results });
+      conv.messages.push({ role: "assistant", content: [{ type: "text", text: THINK_ACK }] });
+      const sep = conv.log.reply.trim() ? " " : "";
+      conv.log.reply += sep + THINK_ACK;
+      emit({ type: "text", delta: sep + THINK_ACK });
+      return "end";
+    }
 
     if (clientUses.length) {
       conv.pending = { results, ids: clientUses.map((u) => u.id), order: uses.map((u) => u.id) };
@@ -2294,6 +2609,17 @@ async function handleTurn(req, res) {
         const text = String(body.text || "").trim();
         if (!text) throw new UserFacing("I didn't catch that.");
         if (!conv || conv.pending) conv = newConv();
+        // The big model is busy: anything asked now would queue behind it (or
+        // swap it out), so answer at once instead, without a model.
+        if (think.job) {
+          const line = thinkBusyReply(text);
+          emit({ type: "start", conv: conv.id, provider: "local", model: settings.thinkModel });
+          emit({ type: "text", delta: line });
+          emit({ type: "done", conv: conv.id });
+          addHistory({ at: Date.now(), conv: conv.id, heard: text, reply: line, provider: "local", model: "(busy thinking)", tools: [] });
+          try { res.end(); } catch (e) {}
+          return;
+        }
         // A provider switch mid-conversation is fine, but pick once per turn.
         conv.provider = await chooseProvider();
         conv.log = { heard: text, reply: "", tools: [], cards: [] };
@@ -2318,6 +2644,8 @@ async function handleTurn(req, res) {
         if (conv && conv.messages.length && conv.messages[conv.messages.length - 1].role === "user") conv.messages.pop();
       }
     }
+    // A think this turn queued starts now that the turn is done with the model.
+    if (think.job && think.job.pending && !(conv && conv.pending)) thinkGo();
     try { res.end(); } catch (e) {}
   });
 }

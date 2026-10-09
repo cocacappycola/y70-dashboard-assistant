@@ -42,6 +42,16 @@
     .him p { margin: 0 0 6px; } .him p:last-child { margin-bottom: 0; }
     .him ul, .him ol { margin: 4px 0 6px; padding-left: 20px; }
     .him code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: rgba(255,255,255,.07); padding: 0 4px; border-radius: 4px; }
+    .him p.h { font-weight: 700; margin-top: 10px; color: var(--t-text, #fff); } .him p.h:first-child { margin-top: 0; }
+    .him pre { margin: 4px 0 8px; padding: 8px 10px; background: rgba(0,0,0,.28); border-radius: 8px; overflow-x: auto; }
+    .him pre code { background: none; padding: 0; font-size: 12px; white-space: pre; }
+    .him .tbl { overflow-x: auto; margin: 4px 0 8px; }
+    .him table { border-collapse: collapse; font-size: 12.5px; }
+    .him th, .him td { border: 1px solid var(--t-line, #2c2c33); padding: 3px 7px; text-align: left; vertical-align: top; }
+    .him th { background: rgba(255,255,255,.05); }
+    /* A deep-think answer: wider, marked as the big model's. */
+    .him.deep { max-width: 96%; border-color: var(--t-accent-dim, #3a3a42); }
+    .deep-tag { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--t-accent, #a85cd6); margin-bottom: 6px; }
     .meta { align-self: flex-start; font-size: 10.5px; color: var(--t-muted, #7a7a85); margin: -6px 0 0 6px; }
     .typing { display: inline-flex; gap: 4px; padding: 3px 0; }
     .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--t-sub, #a6a6b3); animation: blink 1.2s infinite ease-in-out; }
@@ -98,25 +108,46 @@
     let entries = [];
     let pending = null;          // { heard, at } while a turn runs
 
-    // ---- A little markdown: paragraphs, lists, **bold**, `code` -------------
+    // ---- Markdown, enough for his answers: headings, lists, tables, code ----
     const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const inline = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    const inline = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/(^|[\s(])\*([^*\s][^*]*)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>");
     function md(text) {
       const out = [];
-      let list = null;
+      let list = null, code = null, table = null;
+      const endList = () => { if (list) { out.push("</" + list.kind + ">"); list = null; } };
+      const endTable = () => { if (table) { out.push(table.join("") + "</tbody></table></div>"); table = null; } };
       for (const raw of String(text || "").split(/\r?\n/)) {
+        if (code) {
+          if (/^\s*```/.test(raw)) { out.push("<pre><code>" + esc(code.join("\n")) + "</code></pre>"); code = null; }
+          else code.push(raw);
+          continue;
+        }
         const t = raw.trim();
+        if (/^```/.test(t)) { endList(); endTable(); code = []; continue; }
+        if (/^\|.*\|$/.test(t)) {
+          endList();
+          const cells = t.slice(1, -1).split("|").map((c) => c.trim());
+          if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue;          // the |---|---| line
+          if (!table) table = ['<div class="tbl"><table><thead><tr>' + cells.map((c) => "<th>" + inline(c) + "</th>").join("") + "</tr></thead><tbody>"];
+          else table.push("<tr>" + cells.map((c) => "<td>" + inline(c) + "</td>").join("") + "</tr>");
+          continue;
+        }
+        endTable();
+        if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { endList(); continue; }
+        const h = t.match(/^#{1,4}\s+(.*)$/);
+        if (h) { endList(); out.push('<p class="h">' + inline(h[1]) + "</p>"); continue; }
         const ul = t.match(/^[-*•]\s+(.*)$/), ol = t.match(/^(\d+)[.)]\s+(.*)$/);
         if (ul || ol) {
           const kind = ul ? "ul" : "ol";
-          if (!list || list.kind !== kind) { if (list) out.push("</" + list.kind + ">"); list = { kind }; out.push("<" + kind + ">"); }
+          if (!list || list.kind !== kind) { endList(); list = { kind }; out.push("<" + kind + ">"); }
           out.push("<li>" + inline(ul ? ul[1] : ol[2]) + "</li>");
           continue;
         }
-        if (list) { out.push("</" + list.kind + ">"); list = null; }
-        if (t) out.push("<p>" + inline(t.replace(/^#{1,4}\s+/, "")) + "</p>");
+        endList();
+        if (t) out.push("<p>" + inline(t) + "</p>");
       }
-      if (list) out.push("</" + list.kind + ">");
+      if (code) out.push("<pre><code>" + esc(code.join("\n")) + "</code></pre>");
+      endList(); endTable();
       return out.join("");
     }
 
@@ -170,19 +201,29 @@
         if (d !== day) { day = d; log.appendChild(el("div", "day", esc(d))); }
         if (e.heard) log.appendChild(el("div", "msg me", esc(e.heard)));
         for (const c of e.cards || []) { const ce = cardEl(c); if (ce) log.appendChild(ce); }
-        if (e.reply) log.appendChild(el("div", "msg him", md(e.reply)));
-        const tools = (e.tools || []).filter((t) => t !== "look");
-        log.appendChild(el("div", "meta", clock(e.at) + (tools.length ? " · " + esc(tools.join(", ")) : "") + (e.model ? " · " + esc(e.model) : "")));
+        if (e.reply && e.think) log.appendChild(el("div", "msg him deep", '<div class="deep-tag">Thought it through</div>' + md(e.reply)));
+        else if (e.reply) log.appendChild(el("div", "msg him", md(e.reply)));
+        const tools = (e.tools || []).filter((t) => t !== "look" && t !== "think_hard");
+        const took = e.think ? " · thought for " + (e.think.seconds >= 90 ? Math.round(e.think.seconds / 60) + " min" : e.think.seconds + " s") : "";
+        log.appendChild(el("div", "meta", clock(e.at) + took + (tools.length ? " · " + esc(tools.join(", ")) : "") + (e.model ? " · " + esc(e.model) : "")));
       }
       if (pending) {
         log.appendChild(el("div", "msg me", esc(pending.heard)));
         log.appendChild(el("div", "msg him", '<span class="typing"><i></i><i></i><i></i></span>'));
       }
+      // The big model, working in the background.
+      if (thinking) {
+        const what = { waking: "waking the big model", thinking: "working through it", writing: "writing the answer" }[thinking.phase] || "on it";
+        log.appendChild(el("div", "msg me", "Think hard: " + esc(thinking.question)));
+        log.appendChild(el("div", "msg him deep", '<div class="deep-tag">Thinking · ' + (thinking.seconds || 0) + " s · " + what + '</div><span class="typing"><i></i><i></i><i></i></span>'));
+      }
       if (stick || atBottom) log.scrollTop = log.scrollHeight;
     }
+    let thinking = null;         // { question, phase, seconds } while the big model works
 
     async function load() {
       try { const r = await (await fetch(API + "chat")).json(); entries = r.entries || []; } catch (e) {}
+      try { const s = (await (await fetch(API + "status")).json()).status; thinking = s && s.think && s.think.busy ? s.think : null; } catch (e) {}
       render(true);
     }
 
@@ -194,6 +235,10 @@
         if (ev.type === "chat-pending") { pending = { heard: ev.heard, at: ev.at }; render(true); }
         if (ev.type === "chat") { pending = null; entries.push(ev.entry); entries = entries.slice(-120); render(true); }
         if (ev.type === "chat-cleared") { entries = []; pending = null; render(true); }
+        if (ev.type === "think") {
+          thinking = ev.state === "started" || ev.state === "progress" ? { question: ev.question, phase: ev.phase, seconds: ev.seconds } : null;
+          render(ev.state === "started");
+        }
       };
       es.onerror = () => { es.close(); setTimeout(connect, 3000); };
     }
