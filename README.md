@@ -358,6 +358,45 @@ hidden whenever the drawer opens or another app is in front.
 > auto-scroll really does move to a different video; on TikTok the URL doesn't
 > change between clips, so give that one an eyeball.
 
+#### No ads
+
+Everything in the `persist:y70web` session (YouTube, Shorts, TikTok,
+Snapchat, any site Jarvis opens) is ad-blocked, the way Brave does it, always
+on (`v2/adblock.js`, `v2/adguard-preload.js`):
+
+- **Filter lists**, matched on every request and applied to every page:
+  Ghostery's engine (`@ghostery/adblocker-electron`) with EasyList,
+  EasyPrivacy, Peter Lowe's and uBlock Origin's filters / quick fixes / privacy
+  lists, including uBlock's YouTube scriptlets. Compiled once into
+  `adblock-engine.bin` in userData (30 ms to load) and rebuilt in the
+  background every 3 days.
+- **YouTube's own data.** YouTube does not serve ads from ad servers any more;
+  they come inside its player and feed data (`adPlacements`, `adSlots`,
+  `playerAds`, Shorts entries with `adClientParams.isAd`). The guard strips
+  them before YouTube reads them: the inline page objects, `JSON.parse`,
+  `fetch` (`.json()` / `.text()`) and XHR. If one still starts, its picture is
+  hidden, it is muted, skipped and run to its end, and the "ad blockers aren't
+  allowed" dialog is removed.
+- **Every site:** the containers ads always arrive in (Google's ad frames,
+  AdSense, Taboola, Outbrain, AMP ads) are hidden whoever served them. weather.com
+  re-inserts Google's ads through rotating domains no list knows
+  (`pingprove.com/<random>`); hiding the frames is what caught those.
+- **TikTok:** posts flagged `isAd` are dropped from its feed data.
+
+Measured in a hidden window with the panel's phone user agent, against the same
+pages with no blocking at all:
+
+| | no blocking | blocking on |
+|---|---|---|
+| Desktop YouTube, Despacito, 30 s | **11 s of ads**, 50 ad requests | 0 s, 0 got through |
+| Mobile YouTube, 3 music videos, 30 s each | — | 0 s each, played normally |
+| Watch page "Sponsored" feed ad | on screen every check | 0 of 25 |
+| Shorts feed, 25 swipes | **3 ad Shorts**, 74 ad requests | 0, 0 |
+| weather.com | 26 ad frames, 5 visible | 0 visible |
+| dictionary.com | 19 ad frames, 4,702 requests | 0, 96 requests |
+
+Jarvis's `panel status` reports the counts ("how many ads have you blocked?").
+
 ### iPhone (notifications, calls, battery)
 
 Your iPhone's notifications appear on the panel, an incoming call drops down a

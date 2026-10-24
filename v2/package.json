@@ -2,7 +2,7 @@
   "name": "y70-dashboard",
   "version": "3.7.0",
   "private": true,
-  "description": "Native shell for the HYTE Y70 Touch dashboard \u2014 Jarvis fork: a voice assistant on a window that never steals focus.",
+  "description": "Native shell for the HYTE Y70 Touch dashboard — Jarvis fork: a voice assistant on a window that never steals focus.",
   "author": "Cappy",
   "main": "main.js",
   "scripts": {
@@ -22,7 +22,9 @@
       "main.js",
       "preload.js",
       "forks.js",
-      "package.json"
+      "package.json",
+      "adblock.js",
+      "adguard-preload.js"
     ],
     "extraResources": [
       {
@@ -146,6 +148,7 @@
     "@noble/hashes": "1.8.0"
   },
   "dependencies": {
+    "@ghostery/adblocker-electron": "^2.20.1",
     "electron-updater": "^6.8.9"
   }
 }

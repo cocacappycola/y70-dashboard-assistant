@@ -23,6 +23,7 @@ const fs = require("fs");
 const { spawn } = require("child_process");
 const { autoUpdater } = require("electron-updater");
 const forks = require("./forks");
+const adblock = require("./adblock");
 
 // Where the dashboard's pages and server live. When packaged they are copied
 // in as an extraResource, because __dirname points inside app.asar and the
@@ -973,6 +974,7 @@ function raisePanel() {
 ipcMain.handle("y70:screensaver", (_e, action) =>
   action === "start" ? screensaverStart() : action === "stop" ? screensaverStop() : { ok: true, running: !!(saver && saver.exitCode === null) });
 ipcMain.handle("y70:raise", () => raisePanel());
+ipcMain.handle("y70:adblock-stats", () => adblock.getStats());
 
 ipcMain.handle("y70:displays", () => screen.getAllDisplays().map((d, i) => ({
   index: i, bounds: d.bounds, primary: d.id === screen.getPrimaryDisplay().id,
@@ -988,6 +990,9 @@ if (!app.requestSingleInstanceLock()) {
     try { autoStartWanted = !!app.getLoginItemSettings().openAtLogin; } catch (e) {}
     await ensureServer();
     guardWebPartition();
+    // Before any web view exists: the YouTube guard registers synchronously;
+    // the filter lists load from their compiled cache in the background.
+    adblock.start(session.fromPartition(WEB_PARTITION)).catch((e) => console.error("ad blocking failed to start:", e));
     createWindow();
     createTray();
     initUpdater();

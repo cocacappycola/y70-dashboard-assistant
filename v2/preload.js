@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld("y70native", {
   // panel back on top of it without waking the main monitor.
   screensaver: (action) => ipcRenderer.invoke("y70:screensaver", String(action || "state")),
   raise: () => ipcRenderer.invoke("y70:raise"),
+  // What the ad blocker has stopped since the app started (adblock.js).
+  adblockStats: () => ipcRenderer.invoke("y70:adblock-stats"),
 
   reload: () => ipcRenderer.invoke("y70:reload"),
   quit: () => ipcRenderer.invoke("y70:quit"),

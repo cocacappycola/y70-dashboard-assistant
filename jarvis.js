@@ -1167,14 +1167,20 @@
         };
         if (!nat) return JSON.stringify({ ...s, note: "running in a browser: no updates or native settings here" });
         const q = (f) => Promise.resolve().then(f).catch(() => null);
-        const [v, u, f, kb, lock, auto, tb] = await Promise.all([
+        const [v, u, f, kb, lock, auto, tb, ab] = await Promise.all([
           q(() => nat.version()), q(() => nat.updateState()), q(() => nat.forks && nat.forks()),
           q(() => nat.getKeyboardMode()), q(() => nat.getPassiveLock()), q(() => nat.getAutoStart()), q(() => nat.getShowInTaskbar()),
+          q(() => nat.adblockStats && nat.adblockStats()),
         ]);
         return JSON.stringify({
           ...s, version: v, update: updateWords(u),
           fork: f ? { current: f.current, switchingTo: f.switchingTo || null, available: f.forks.map((x) => x.id + " (" + x.name + ")") } : null,
           keyboardMode: kb, neverTakeFocus: lock, startWithWindows: auto, taskbarIcon: tb,
+          adBlocking: ab ? {
+            on: ab.active, since: new Date(ab.since).toLocaleString(),
+            adAndTrackerRequestsBlocked: ab.requests, youtubeAdsStripped: ab.youtube, youtubeAdsSkipped: ab.youtubeSkipped,
+            youtubeAdBlockerNagsRemoved: ab.youtubeNags, tiktokSponsoredPostsRemoved: ab.tiktok, problem: ab.error || undefined,
+          } : null,
         });
       }
       case "check_updates": {
