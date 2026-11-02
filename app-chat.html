@@ -57,6 +57,55 @@
     #mem .msg { max-width: 100%; }
     .msg.flash { box-shadow: 0 0 0 2px var(--t-accent, #a85cd6); }
 
+    /* ---- Tabs under the header ---- */
+    .tabs { flex-shrink: 0; display: flex; gap: 4px; padding: 6px 10px; background: var(--t-bg-2, #101014); border-bottom: 1px solid var(--t-line, #2c2c33); }
+    .tabs button { flex: 1; min-height: 34px; border: 0; border-radius: 10px; background: transparent; color: var(--t-sub, #a6a6b3); font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; }
+    .tabs button.on { background: var(--t-accent-soft, rgba(168,92,214,.25)); color: var(--t-text, #fff); }
+    #usage { font-size: 10.5px; color: var(--t-muted, #7a7a85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+    #usage:empty { display: none; }
+
+    /* ---- Live meter inside his "typing" bubble ---- */
+    .pmeter { margin-top: 6px; font-size: 11px; color: var(--t-sub, #a6a6b3); font-variant-numeric: tabular-nums; min-width: 220px; }
+    .pmeter .bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; margin: 4px 0; }
+    .pmeter .bar i { display: block; height: 100%; background: linear-gradient(90deg, #5ab0ff, var(--t-accent, #a85cd6)); transition: width .3s; }
+    .pmeter .bar i.warm { background: #ffb35c; } .pmeter .bar i.hot { background: #ff4d6d; }
+
+    /* ---- "Can I…?" above the box ---- */
+    #perms { flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; padding: 0 12px; }
+    #perms:empty { display: none; }
+    #perms .jp { margin-top: 8px; border-radius: 14px; padding: 10px 12px; background: rgba(255,179,92,.08); border: 1px solid rgba(255,179,92,.45); }
+    #perms .jp.read { background: rgba(90,176,255,.08); border-color: rgba(90,176,255,.35); }
+    #perms .k { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--t-sub, #a6a6b3); }
+    #perms .t { font-size: 15px; font-weight: 700; margin-top: 3px; }
+    #perms .p { font-size: 11.5px; color: var(--t-sub, #a6a6b3); word-break: break-all; }
+    #perms pre { margin: 6px 0 0; max-height: 140px; overflow: auto; font: 11px/1.4 ui-monospace, Consolas, monospace; background: rgba(0,0,0,.3); border-radius: 8px; padding: 6px 8px; white-space: pre-wrap; }
+    #perms .b { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+
+    /* ---- Stats ---- */
+    #stats { gap: 12px; }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+    .tile { background: var(--t-surface, #16161a); border: 1px solid var(--t-line, #2c2c33); border-radius: 12px; padding: 9px 11px; }
+    .tile .v { font-size: 20px; font-weight: 300; font-variant-numeric: tabular-nums; }
+    .tile .l { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--t-muted, #7a7a85); margin-top: 2px; }
+    .tile .s { font-size: 11px; color: var(--t-sub, #a6a6b3); margin-top: 2px; }
+    .sec-h { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--t-sub, #a6a6b3); margin: 6px 0 -4px; }
+    .chart { display: flex; align-items: flex-end; gap: 3px; height: 110px; padding: 8px 8px 0; background: var(--t-surface, #16161a); border: 1px solid var(--t-line, #2c2c33); border-radius: 12px; }
+    .chart .col { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; position: relative; cursor: default; }
+    .chart .col i { display: block; width: 100%; border-radius: 2px 2px 0 0; }
+    .chart .col i.in { background: rgba(90,176,255,.65); } .chart .col i.out { background: var(--t-accent, #a85cd6); }
+    .chart .col i.tl { background: #ffb35c; }
+    .chart .col.today i.in { background: #5ab0ff; }
+    .axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--t-muted, #7a7a85); padding: 2px 8px 0; }
+    .legend { display: flex; gap: 12px; font-size: 11px; color: var(--t-sub, #a6a6b3); }
+    .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; background: var(--c); }
+    table.t { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+    table.t th { text-align: left; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--t-muted, #7a7a85); font-weight: 700; padding: 4px 6px; border-bottom: 1px solid var(--t-line, #2c2c33); }
+    table.t td { padding: 5px 6px; border-bottom: 1px solid rgba(255,255,255,.04); white-space: nowrap; }
+    table.t td.n, table.t th.n { text-align: right; }
+    table.t td.w { white-space: normal; word-break: break-word; }
+    .tbox { background: var(--t-surface, #16161a); border: 1px solid var(--t-line, #2c2c33); border-radius: 12px; padding: 4px 6px; overflow-x: auto; }
+    .bad { color: #ff8f8f; }
+
     /* ---- The conversation ---- */
     #log { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 12px 8px; display: flex; flex-direction: column; gap: 10px; }
     #log::-webkit-scrollbar { width: 4px; height: 0; }
@@ -116,11 +165,15 @@
   <div id="wrap">
     <div id="head">
       <span class="orb"></span>
-      <div class="ht"><div id="title">Jarvis</div><div id="sub">your conversation</div></div>
+      <div class="ht"><div id="title">Jarvis</div><div id="sub">your conversation</div><div id="usage"></div></div>
       <button class="btn btn--ghost btn--sm" id="b-del" hidden>Delete</button>
-      <button class="btn btn--ghost btn--sm" id="b-chats">Chats</button>
       <button class="btn btn--ghost btn--sm" id="b-new">New</button>
-      <button class="btn btn--ghost btn--sm" id="b-mem">Memory</button>
+    </div>
+    <div class="tabs" id="tabs">
+      <button data-v="chat" class="on">Chat</button>
+      <button data-v="list">Chats</button>
+      <button data-v="mem">Memory</button>
+      <button data-v="stats">Stats</button>
     </div>
     <div id="log"></div>
     <div id="list" class="pane">
@@ -133,6 +186,8 @@
       <div id="rows"></div>
     </div>
     <div id="mem" class="pane"></div>
+    <div id="stats" class="pane"></div>
+    <div id="perms"></div>
     <form id="compose">
       <input class="ui-input" id="say" placeholder="Type to Jarvis…" autocomplete="off" />
       <button class="btn btn--primary btn--sm" id="send" type="submit">Send</button>
@@ -149,6 +204,8 @@
 
     // ---- Markdown, enough for his answers: headings, lists, tables, code ----
     const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    // 9400 -> "9.4k"
+    const kfmt = (n) => { n = Number(n) || 0; return n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M" : n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n); };
     const inline = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/(^|[\s(])\*([^*\s][^*]*)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>");
     function md(text) {
       const out = [];
@@ -246,11 +303,15 @@
         else if (e.reply) log.appendChild(el("div", "msg him", md(e.reply)));
         const tools = (e.tools || []).filter((t) => t !== "look" && t !== "think_hard");
         const took = e.think ? " · thought for " + (e.think.seconds >= 90 ? Math.round(e.think.seconds / 60) + " min" : e.think.seconds + " s") : "";
-        log.appendChild(el("div", "meta", clock(e.at) + took + (tools.length ? " · " + esc(tools.join(", ")) : "") + (e.model ? " · " + esc(e.model) : "")));
+        const u = e.usage;
+        const used = u ? " · " + kfmt(u.in) + " in · " + kfmt(u.out) + " out" + (u.requests > 1 ? " · " + u.requests + " steps" : "") + (u.ms ? " · " + (u.ms / 1000).toFixed(1) + " s" : "") : "";
+        log.appendChild(el("div", "meta", clock(e.at) + took + (tools.length ? " · " + esc(tools.join(", ")) : "") + (e.model ? " · " + esc(e.model) : "") + used));
       }
       if (pending && (!pending.chatId || (cur && pending.chatId === cur.id))) {
         log.appendChild(el("div", "msg me", esc(pending.heard)));
-        log.appendChild(el("div", "msg him", '<span class="typing"><i></i><i></i><i></i></span>'));
+        const bubble = log.appendChild(el("div", "msg him", '<span class="typing"><i></i><i></i><i></i></span>'));
+        bubble.appendChild(el("div", "pmeter")).id = "pmeter";
+        drawMeter();
       }
       // The big model, working in the background.
       if (thinking) {
@@ -260,9 +321,22 @@
       }
       if (stick || atBottom) log.scrollTop = log.scrollHeight;
     }
+    // The live meter while he answers (the latest "meter" event).
+    let liveMeter = null;
+    function drawMeter() {
+      const box = document.getElementById("pmeter");
+      const m = liveMeter;
+      if (!box) return;
+      if (!m) { box.textContent = ""; return; }
+      const pct = m.window ? Math.min(100, Math.round((m.ctx / m.window) * 100)) : null;
+      const now = m.stage === "reading" ? "reading the prompt" : m.stage === "writing" ? "writing · " + m.out + " tok · " + m.tps + " tok/s" : m.stage === "tool" ? "using tools" : "step " + m.step + " done";
+      box.innerHTML = "<div>" + (m.est ? "~" : "") + kfmt(m.ctx) + (m.window ? " / " + kfmt(m.window) + " context · " + pct + "%" : " tokens of context") + "</div>" +
+        (pct != null ? '<div class="bar"><i class="' + (pct >= 90 ? "hot" : pct >= 70 ? "warm" : "") + '" style="width:' + Math.max(1, pct) + '%"></i></div>' : "") +
+        "<div>" + esc(now) + " · so far " + kfmt(m.turnIn) + " in · " + kfmt(m.turnOut) + " out" + (m.toolCalls ? " · " + m.toolCalls + " tools" : "") + " · " + (m.elapsed / 1000).toFixed(1) + " s</div>";
+    }
     let thinking = null;         // { question, phase, seconds } while the big model works
     let cur = null;              // the chat on screen
-    let view = "chat";           // chat | list | mem
+    let view = "chat";           // chat | list | mem | stats
     let listKind = "";
     let manualAt = 0;            // you picked a chat yourself: Jarvis does not switch away for a minute
     const following = () => Date.now() - manualAt > 60 * 1000;
@@ -278,24 +352,44 @@
       log.style.display = v === "chat" ? "" : "none";
       $("#list").classList.toggle("show", v === "list");
       $("#mem").classList.toggle("show", v === "mem");
-      $("#b-chats").classList.toggle("on", v === "list");
-      $("#b-mem").classList.toggle("on", v === "mem");
-      $("#compose").style.display = v === "mem" ? "none" : "";
+      $("#stats").classList.toggle("show", v === "stats");
+      document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.v === v));
+      $("#compose").style.display = v === "mem" || v === "stats" ? "none" : "";
       if (v === "list") loadList();
       if (v === "mem") loadMemory();
+      if (v === "stats") loadStats();
       head();
     }
 
     function head() {
       const del = $("#b-del");
+      $("#usage").textContent = "";
       if (view === "list") { $("#title").textContent = "Chats"; $("#sub").textContent = "every conversation, kept · basic commands clear after 7 days"; del.hidden = true; return; }
       if (view === "mem") { $("#title").textContent = "Memory guide"; $("#sub").textContent = "what Jarvis knows, kept up to date from every conversation"; del.hidden = true; return; }
+      if (view === "stats") { $("#title").textContent = "Usage"; $("#sub").textContent = "tokens, requests and tool calls: today, this month, all time"; del.hidden = true; return; }
       if (!cur) { $("#title").textContent = "Jarvis"; $("#sub").textContent = "a new conversation"; del.hidden = true; return; }
       $("#title").textContent = cur.title;
       $("#sub").textContent = cur.kind === "basic"
         ? "Basic commands · each clears after 7 days"
         : (cur.summary || ((n) => n + (n === 1 ? " exchange" : " exchanges") + " · since " + ago(cur.created))((cur.turns || []).length));
+      $("#usage").textContent = usageLine(chatUsage(cur));
       del.hidden = false;
+    }
+    // This chat's usage, from its exchanges.
+    function chatUsage(c) {
+      const u = { in: 0, cached: 0, out: 0, requests: 0, toolCalls: 0, toolFails: 0, ms: 0, counted: 0 };
+      for (const t of (c && c.turns) || []) {
+        if (!t.usage) continue;
+        u.counted++;
+        for (const k of ["in", "cached", "out", "requests", "toolCalls", "toolFails", "ms"]) u[k] += t.usage[k] | 0;
+      }
+      return u;
+    }
+    function usageLine(u) {
+      if (!u || !u.counted) return "";
+      return kfmt(u.in) + " in" + (u.cached ? " (" + kfmt(u.cached) + " cached)" : "") + " · " + kfmt(u.out) + " out · " +
+        u.requests + (u.requests === 1 ? " request" : " requests") + " · " + u.toolCalls + (u.toolCalls === 1 ? " tool call" : " tool calls") +
+        (u.toolFails ? " (" + u.toolFails + " failed)" : "") + (u.counted < ((cur && cur.turns) || []).length ? " · since counting began" : "");
     }
 
     async function openChat(id, opts) {
@@ -366,8 +460,133 @@
       box.appendChild(el("div", "msg him", r && r.markdown ? md(r.markdown.replace(/^# .*\n/, "")) : "Couldn't load the memory guide."));
     }
 
-    $("#b-chats").addEventListener("click", () => setView(view === "list" ? "chat" : "list"));
-    $("#b-mem").addEventListener("click", () => setView(view === "mem" ? "chat" : "mem"));
+    $("#tabs").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-v]");
+      if (!b) return;
+      setView(b.dataset.v);
+      if (b.dataset.v === "chat") render(true);
+    });
+
+    // ---- Stats: tokens, requests and tool calls, in detail ---------------------------
+    let statsRange = "day";
+    const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
+    const secs = (ms) => ms >= 60000 ? (ms / 60000).toFixed(1) + " min" : (ms / 1000).toFixed(1) + " s";
+    async function loadStats() {
+      const box = $("#stats");
+      const [r, cl] = await Promise.all([
+        fetch(API + "usage").then((x) => x.json()).catch(() => null),
+        fetch(API + "chats").then((x) => x.json()).catch(() => ({ chats: [] })),
+      ]);
+      if (!r || !r.ok) { box.innerHTML = '<div class="note">Couldn\'t load the stats.</div>'; return; }
+      const b = statsRange === "day" ? r.day : statsRange === "month" ? r.month : r.all;
+      const h = [];
+      h.push('<div class="chips" id="srange">' + [["day", "Today"], ["month", "This month"], ["all", "All time"]].map(([k, l]) =>
+        '<button class="chip' + (k === statsRange ? " on" : "") + '" data-r="' + k + '">' + l + "</button>").join("") + "</div>");
+      if (!b.requests && !b.toolCalls && !b.turns) h.push('<div class="note">Nothing yet ' + (statsRange === "day" ? "today" : statsRange === "month" ? "this month" : "") + ". Every request Jarvis makes is counted from now on.</div>");
+      const tps = b.genMs ? (b.out / (b.genMs / 1000)).toFixed(1) : "–";
+      const rps = b.promptMs ? Math.round((b.in - b.cached) / (b.promptMs / 1000)) : "–";
+      const tile = (v, l, s) => '<div class="tile"><div class="v">' + v + '</div><div class="l">' + l + "</div>" + (s ? '<div class="s">' + s + "</div>" : "") + "</div>";
+      h.push('<div class="tiles">' + [
+        tile(kfmt(b.in + b.out), "tokens", kfmt(b.in) + " in · " + kfmt(b.out) + " out"),
+        tile(kfmt(b.in), "tokens in", kfmt(b.cached) + " cached (" + pct(b.cached, b.in) + "%)"),
+        tile(kfmt(b.out), "tokens out", "largest answer " + kfmt(b.maxOut)),
+        tile(b.turns, "answers", (b.failedTurns ? '<span class="bad">' + b.failedTurns + " hit an error</span> · " : "") + (b.turns ? "avg " + secs(b.turnMs / b.turns) : "")),
+        tile(b.requests, "model requests", b.turns ? (b.requests / b.turns).toFixed(1) + " per answer" : ""),
+        tile(b.toolCalls, "tool calls", (b.toolFails ? '<span class="bad">' + b.toolFails + " failed</span>" : "none failed") + (b.toolCalls ? " · avg " + secs(b.toolMs / b.toolCalls) : "")),
+        tile(tps, "tok/s writing", "reading " + rps + " tok/s"),
+        tile(kfmt(b.maxIn), "largest prompt", b.requests ? "avg " + kfmt(Math.round(b.in / b.requests)) : ""),
+        tile(secs(b.ms), "model time", "writing " + secs(b.genMs) + " · reading " + secs(b.promptMs)),
+        tile(b.maxTurnMs ? secs(b.maxTurnMs) : "–", "slowest answer", b.first ? "since " + new Date(b.first).toLocaleDateString([], { month: "short", day: "numeric", year: statsRange === "all" ? "numeric" : undefined }) : ""),
+      ].join("") + "</div>");
+
+      // Per day (last 31) or, for today, per hour.
+      if (statsRange === "day") {
+        const hours = b.hours || [];
+        const max = Math.max(1, ...hours.map((x) => x.in + x.out));
+        h.push('<div class="sec-h">Today by hour</div>');
+        h.push('<div class="chart">' + hours.map((x, i) => '<div class="col" title="' + i + ':00 · ' + kfmt(x.in) + " in · " + kfmt(x.out) + " out · " + x.requests + " requests · " + x.toolCalls + ' tools"><i class="out" style="height:' + pct(x.out, max) + '%"></i><i class="in" style="height:' + pct(x.in, max) + '%"></i></div>').join("") + "</div>");
+        h.push('<div class="axis"><span>12 am</span><span>6 am</span><span>noon</span><span>6 pm</span><span>11 pm</span></div>');
+      } else {
+        const days = r.days;
+        const max = Math.max(1, ...days.map((x) => x.in + x.out));
+        h.push('<div class="sec-h">Last 31 days</div>');
+        h.push('<div class="chart">' + days.map((x, i) => '<div class="col' + (i === days.length - 1 ? " today" : "") + '" title="' + x.day + " · " + kfmt(x.in) + " in · " + kfmt(x.out) + " out · " + x.requests + " requests · " + x.turns + " answers · " + x.toolCalls + ' tools"><i class="out" style="height:' + pct(x.out, max) + '%"></i><i class="in" style="height:' + pct(x.in, max) + '%"></i></div>').join("") + "</div>");
+        h.push('<div class="axis"><span>' + days[0].day.slice(5) + "</span><span>" + days[15].day.slice(5) + "</span><span>today</span></div>");
+      }
+      h.push('<div class="legend"><span style="--c:rgba(90,176,255,.65)">tokens in</span><span style="--c:var(--t-accent,#a85cd6)">tokens out</span></div>');
+
+      const table = (heads, rows) => '<div class="tbox"><table class="t"><tr>' + heads.map((x) => "<th" + (x.n ? ' class="n"' : "") + ">" + x.t + "</th>").join("") + "</tr>" +
+        (rows.length ? rows.join("") : '<tr><td colspan="' + heads.length + '" class="w">none</td></tr>') + "</table></div>";
+      const td = (v, n, cls) => "<td" + (n || cls ? ' class="' + (n ? "n " : "") + (cls || "") + '"' : "") + ">" + v + "</td>";
+      // Models
+      h.push('<div class="sec-h">Models</div>');
+      h.push(table([{ t: "model" }, { t: "req", n: 1 }, { t: "in", n: 1 }, { t: "cached", n: 1 }, { t: "out", n: 1 }, { t: "tok/s", n: 1 }],
+        Object.entries(b.models || {}).sort((x, y) => (y[1].in + y[1].out) - (x[1].in + x[1].out)).map(([k, m]) =>
+          "<tr>" + td(esc(k)) + td(m.requests, 1) + td(kfmt(m.in), 1) + td(pct(m.cached, m.in) + "%", 1) + td(kfmt(m.out), 1) + td(m.genMs ? (m.out / (m.genMs / 1000)).toFixed(1) : "–", 1) + "</tr>")));
+      // Tools
+      h.push('<div class="sec-h">Tools</div>');
+      h.push(table([{ t: "tool" }, { t: "calls", n: 1 }, { t: "ok", n: 1 }, { t: "failed", n: 1 }, { t: "avg", n: 1 }, { t: "slowest", n: 1 }],
+        Object.entries(b.tools || {}).sort((x, y) => y[1].calls - x[1].calls).map(([k, t]) =>
+          "<tr>" + td(esc(k)) + td(t.calls, 1) + td(t.ok, 1) + td(t.fail, 1, t.fail ? "bad" : "") + td(secs(t.ms / t.calls), 1) + td(secs(t.maxMs), 1) + "</tr>")));
+      // What the tokens went on
+      const KIND = { turn: "answering you", notes: "memory note-taker", think: "thinking hard" };
+      h.push('<div class="sec-h">Spent on</div>');
+      h.push(table([{ t: "what" }, { t: "requests", n: 1 }, { t: "in", n: 1 }, { t: "out", n: 1 }],
+        Object.entries(b.kinds || {}).map(([k, x]) => "<tr>" + td(KIND[k] || esc(k)) + td(x.requests, 1) + td(kfmt(x.in), 1) + td(kfmt(x.out), 1) + "</tr>")));
+      // Chats that used the most
+      const top = (cl.chats || []).filter((c) => c.usage && c.usage.counted).sort((x, y) => (y.usage.in + y.usage.out) - (x.usage.in + x.usage.out)).slice(0, 10);
+      h.push('<div class="sec-h">Chats that used the most (all time)</div>');
+      h.push(table([{ t: "chat" }, { t: "in", n: 1 }, { t: "out", n: 1 }, { t: "req", n: 1 }, { t: "tools", n: 1 }],
+        top.map((c) => '<tr data-chat="' + c.id + '" style="cursor:pointer">' + td(esc(c.title), 0, "w") + td(kfmt(c.usage.in), 1) + td(kfmt(c.usage.out), 1) + td(c.usage.requests, 1) + td(c.usage.toolCalls, 1) + "</tr>")));
+      // Month by month
+      if (statsRange !== "day") {
+        h.push('<div class="sec-h">By month</div>');
+        h.push(table([{ t: "month" }, { t: "answers", n: 1 }, { t: "req", n: 1 }, { t: "in", n: 1 }, { t: "out", n: 1 }, { t: "tools", n: 1 }],
+          r.months.slice().reverse().map((m) => "<tr>" + td(m.month) + td(m.turns, 1) + td(m.requests, 1) + td(kfmt(m.in), 1) + td(kfmt(m.out), 1) + td(m.toolCalls + (m.toolFails ? " (" + m.toolFails + "✕)" : ""), 1) + "</tr>")));
+      }
+      // The latest events, one by one
+      h.push('<div class="sec-h">Latest</div>');
+      h.push(table([{ t: "time" }, { t: "what" }, { t: "detail", n: 1 }],
+        (r.recent || []).slice(0, 40).map((e) => "<tr>" + td(new Date(e.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })) +
+          (e.t === "req" ? td(esc((KIND[e.kind] || e.kind) + " · " + e.model)) + td(kfmt(e.in) + " in" + (e.cached ? " (" + kfmt(e.cached) + " c)" : "") + " · " + e.out + " out · " + secs(e.ms), 1)
+            : e.t === "tool" ? td("tool · " + esc(e.name)) + td((e.ok ? "ok" : '<span class="bad">failed</span>') + " · " + secs(e.ms), 1)
+            : td("answer" + (e.ok ? "" : ' <span class="bad">hit an error</span>')) + td(e.steps + (e.steps === 1 ? " step · " : " steps · ") + kfmt(e.in) + " in · " + kfmt(e.out) + " out · " + secs(e.ms), 1)) + "</tr>")));
+      const keep = box.scrollTop;
+      box.innerHTML = h.join("");
+      box.scrollTop = keep;
+    }
+    $("#stats").addEventListener("click", (e) => {
+      const c = e.target.closest("#srange .chip");
+      if (c) { statsRange = c.dataset.r; loadStats(); return; }
+      const row = e.target.closest("tr[data-chat]");
+      if (row) openChat(row.dataset.chat, { manual: true });
+    });
+
+    // ---- "Can I…?" from Jarvis, answered here or on the card ----------------------------
+    const permsList = [];
+    function drawPerms() {
+      const box = $("#perms");
+      box.innerHTML = "";
+      for (const p of permsList) {
+        const d = el("div", "jp" + (p.write ? "" : " read"));
+        d.innerHTML = '<div class="k">' + (p.write ? "Jarvis wants to change something" : "Jarvis wants to look") + '</div><div class="t">' + esc(p.title) + "</div>" +
+          (p.path ? '<div class="p">' + esc(p.path) + "</div>" : "") + (p.detail ? "<pre>" + esc(p.detail) + "</pre>" : "");
+        const row = el("div", "b");
+        for (const [a, t, cls] of [["allow", "Allow", "btn--primary"], ["always", "Allow for this chat", "btn--ghost"], ["deny", "No", "btn--ghost"]]) {
+          const btn = el("button", "btn btn--sm " + cls, t);
+          btn.addEventListener("click", async () => {
+            const i = permsList.findIndex((x) => x.id === p.id);
+            if (i >= 0) permsList.splice(i, 1);
+            drawPerms();
+            await fetch(API + "permission/" + p.id, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answer: a }) }).catch(() => {});
+          });
+          row.appendChild(btn);
+        }
+        d.appendChild(row);
+        box.appendChild(d);
+      }
+    }
+    fetch(API + "permissions").then((x) => x.json()).then((r) => { for (const p of (r && r.pending) || []) permsList.push(p); drawPerms(); }).catch(() => {});
     // New: the next thing you ask starts a fresh chat.
     $("#b-new").addEventListener("click", async () => {
       await fetch(API + "chats/new", { method: "POST" }).catch(() => {});
@@ -399,7 +618,22 @@
       const es = new EventSource(API + "events");
       es.onmessage = (m) => {
         let ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
+        if (ev.type === "meter") {
+          liveMeter = ev.stage === "done" ? null : ev;
+          drawMeter();
+          return;
+        }
+        if (ev.type === "permission") {
+          if (!permsList.some((p) => p.id === ev.id)) { permsList.push(ev); drawPerms(); }
+          return;
+        }
+        if (ev.type === "permission-done") {
+          const i = permsList.findIndex((p) => p.id === ev.id);
+          if (i >= 0) { permsList.splice(i, 1); drawPerms(); }
+          return;
+        }
         if (ev.type === "chat-pending") {
+          liveMeter = null;
           pending = { heard: ev.heard, at: ev.at, chatId: ev.chatId || null };
           if (ev.chatId && (!cur || cur.id !== ev.chatId) && following()) openChat(ev.chatId);
           else if (view === "chat") render(true);
@@ -416,6 +650,7 @@
           } else if (!cur || (following() && !(ev.entry.chatKind === "basic" && cur.kind === "topic"))) openChat(id);
           else if (view === "chat") render();   // (a quick command mid-conversation doesn't pull the app away)
           if (view === "list") loadList();
+          if (view === "stats") loadStats();
         }
         // He opened a chat (asked to, or a new one): show it.
         if (ev.type === "chat-open" && ev.chat) { manualAt = 0; openChat(ev.chat); }

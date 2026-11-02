@@ -83,6 +83,12 @@ body.island-on #island {
 #island .seg-label { overflow: hidden; text-overflow: ellipsis; }
 #island .seg-ico { width: 18px; text-align: center; opacity: .85; }
 #island .seg.ring { color: #ffd36b; animation: isl-pulse 1s ease-in-out infinite; }
+/* The context gauge while he works. */
+#island .seg.meter { gap: 6px; color: var(--isl-sub); font-size: 11.5px; }
+#island .mini { width: 34px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.14); overflow: hidden; flex-shrink: 0; }
+#island .mini i { display: block; height: 100%; width: 0; background: var(--jv-b); transition: width .3s ease; }
+#island .mini i.warm { background: var(--jv-d); }
+#island .mini i.hot { background: #ff4d6d; }
 @keyframes isl-pulse { 50% { opacity: .55; } }
 
 /* Little live bars while Jarvis speaks. */
@@ -137,8 +143,51 @@ body.island-on #island {
 .jv-state { font-size: 12px; font-weight: 650; color: var(--isl-sub); }
 .jv-heard { font-size: 15px; color: var(--isl-sub); margin-top: 10px; line-height: 1.35; }
 .jv-heard:empty { display: none; }
-.jv-reply { font-size: 19px; line-height: 1.38; margin-top: 8px; font-weight: 500; white-space: pre-wrap; }
+/* His reply, drawn from markdown: paragraphs, lists, headings, code, tables. */
+.jv-reply { font-size: 18px; line-height: 1.42; margin-top: 8px; font-weight: 500; overflow-wrap: anywhere; }
 .jv-reply:empty { display: none; }
+.jv-reply p { margin: 0 0 8px; }
+.jv-reply p:last-child, .jv-reply ul:last-child, .jv-reply ol:last-child { margin-bottom: 0; }
+.jv-reply b { font-weight: 750; color: #fff; }
+.jv-reply i { font-style: italic; }
+.jv-reply ul, .jv-reply ol { margin: 2px 0 10px; padding-left: 22px; font-size: 16.5px; }
+.jv-reply li { margin: 3px 0; }
+.jv-reply li::marker { color: var(--isl-sub); }
+.jv-reply .md-h { font-size: 13px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--isl-sub); margin: 12px 0 6px; }
+.jv-reply .md-h:first-child { margin-top: 0; }
+.jv-reply code { font-family: ui-monospace, Consolas, monospace; font-size: .84em; background: rgba(255,255,255,.09); padding: 1px 5px; border-radius: 5px; }
+.jv-reply pre { margin: 6px 0 10px; padding: 10px 12px; background: rgba(255,255,255,.05); border: 1px solid var(--isl-line); border-radius: 12px; overflow-x: auto; }
+.jv-reply pre code { background: none; padding: 0; font-size: 13px; white-space: pre; }
+.jv-reply .md-tbl { overflow-x: auto; margin: 6px 0 10px; }
+.jv-reply table { border-collapse: collapse; font-size: 14px; }
+.jv-reply th, .jv-reply td { border: 1px solid var(--isl-line); padding: 4px 8px; text-align: left; vertical-align: top; }
+.jv-reply th { background: rgba(255,255,255,.06); font-weight: 700; }
+
+/* Meters: the context window and this answer's tokens, live. */
+.jv-meter { margin-top: 10px; padding: 9px 11px; border-radius: 14px; background: rgba(255,255,255,.04); border: 1px solid var(--isl-line); font-size: 11.5px; color: var(--isl-sub); font-variant-numeric: tabular-nums; }
+.jv-meter:empty { display: none; }
+.jm-row { display: flex; gap: 8px; align-items: baseline; line-height: 1.45; }
+.jm-row[hidden] { display: none; }
+.jm-k { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.jm-ctx { margin-left: auto; color: var(--isl-text); font-weight: 650; }
+.jm-bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; margin: 5px 0 6px; }
+.jm-bar i { display: block; height: 100%; width: 0; border-radius: 3px; background: linear-gradient(90deg, var(--jv-b), var(--jv-a)); transition: width .3s ease; }
+.jm-bar i.warm { background: linear-gradient(90deg, var(--jv-d), #ffb340); }
+.jm-bar i.hot { background: linear-gradient(90deg, #ff7a5c, #ff4d6d); }
+.jm-live { color: var(--isl-text); }
+.jv-meter.live .jm-live::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ui-live, #46d18a); margin-right: 6px; animation: isl-pulse 1s ease-in-out infinite; }
+
+/* "Can I…?": a change waiting for a tap. */
+.jv-perms:empty { display: none; }
+.jv-perms { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.jp { border-radius: 18px; padding: 12px 13px; background: rgba(90,176,255,.08); border: 1px solid rgba(90,176,255,.35); }
+.jp.write { background: rgba(255,179,92,.08); border-color: rgba(255,179,92,.45); }
+.jp-k { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--isl-sub); }
+.jp-t { font-size: 16px; font-weight: 700; margin-top: 4px; }
+.jp-p { font-size: 12px; color: var(--isl-sub); margin-top: 2px; word-break: break-all; }
+.jp-d { margin: 8px 0 0; max-height: 180px; overflow: auto; font: 11.5px/1.4 ui-monospace, Consolas, monospace; color: var(--isl-text); background: rgba(0,0,0,.35); border-radius: 10px; padding: 8px 10px; white-space: pre-wrap; word-break: break-word; }
+.jp-btns { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.jp-btns .btn { min-height: 40px; }
 .jv-status { font-size: 11.5px; color: var(--isl-sub); margin-top: 8px; display: flex; gap: 6px; align-items: center; }
 .jv-status:empty { display: none; }
 .jv-status .spin {

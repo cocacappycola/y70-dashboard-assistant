@@ -30,6 +30,8 @@ const web = require("./assistant-web");
 const models = require("./assistant-models");
 const chats = require("./assistant-chats");
 const memory = require("./assistant-memory");
+const usage = require("./assistant-usage");
+const fileTools = require("./assistant-files");
 const govee = require("./govee");
 const discord = require("./discord");
 
@@ -47,7 +49,11 @@ const DEFAULTS = {
   localUrl: "http://127.0.0.1:8081",
   localModel: "jarvis-9b",          // any [section] of jarvis-models.ini
   thinkModel: "jarvis-flash",       // the big model "think hard" hands questions to
-  autoGameModel: true,              // use the 4B while a game is in front
+  thinkHard: false,                 // offer think_hard at all (off: he never hands anything over)
+  autoGameModel: true,              // use the gaming model while a game is in front
+  gameModel: "jarvis-4b",           // ...which is this one
+  bootModel: true,                  // load the everyday model as soon as the router is up
+  files: "ask",                     // files + repo tools: off | ask (changes) | askall (reading too) | bypass
   localBat: "",                     // jarvis-llm.bat, so the panel can start it
   wake: true,
   wakePhrase: "jarvis",
@@ -92,6 +98,9 @@ function saveSettings(patch) {
   if (!CLAUDE_MODELS.includes(next.claudeModel)) next.claudeModel = DEFAULTS.claudeModel;
   if (!/^[\w.\-]{1,64}$/.test(String(next.localModel || ""))) next.localModel = DEFAULTS.localModel;
   if (!/^[\w.\-]{1,64}$/.test(String(next.thinkModel || ""))) next.thinkModel = DEFAULTS.thinkModel;
+  if (!/^[\w.\-]{1,64}$/.test(String(next.gameModel || ""))) next.gameModel = DEFAULTS.gameModel;
+  if (!["off", "ask", "askall", "bypass"].includes(next.files)) next.files = DEFAULTS.files;
+  next.thinkHard = !!next.thinkHard; next.bootModel = !!next.bootModel;
   next.sensitivity = Math.max(0, Math.min(1, Number(next.sensitivity) || 0.5));
   next.endSilence = Math.round(Math.max(0.5, Math.min(4, Number(next.endSilence) || 1.5)) * 4) / 4;
   next.rate = Math.max(0.6, Math.min(2, Number(next.rate) || 1));
@@ -110,6 +119,10 @@ function saveSettings(patch) {
   if (prev && (prev.kokoroDir !== next.kokoroDir || ttsEngine() !== "kokoro")) { kokoroStop(); if (prev.kokoroDir !== next.kokoroDir) kokoro.err = null; }
   if (ttsEngine() === "kokoro") kokoroStart();
   applyVoiceSettings();
+  // Think hard switched off mid-think: stop it and give the router back.
+  if (prev && prev.thinkHard && !next.thinkHard && think.job) thinkCancel("think hard was turned off");
+  // A new everyday model (or gaming one, in a game): have it ready.
+  if (prev && (prev.localModel !== next.localModel || prev.gameModel !== next.gameModel || (!prev.bootModel && next.bootModel))) setTimeout(() => bootLoad(true), 500);
   return null;
 }
 
@@ -588,20 +601,22 @@ function isBig(id, file) {
 // an instant "still thinking"; see handleTurn). The next question after it
 // finishes swaps the everyday model back in.
 function localModelNow() {
-  if (settings.autoGameModel && game.on) return "jarvis-4b";
+  if (settings.autoGameModel && game.on) return settings.gameModel || "jarvis-4b";
   if (think.job && !think.job.pending && thinkReady()) return settings.thinkModel;
   return settings.localModel;
 }
 
-// A game just came to the front. If the big model is sitting in VRAM, hand it
-// back now rather than at the next question.
+// A game just came to the front. If a bigger model is sitting in VRAM, hand it
+// back now rather than at the next question. When the game ends, the everyday
+// model comes back.
 async function onGameChange() {
   broadcast({ type: "status", status: status() });
-  if (!settings.autoGameModel || !game.on) return;
+  if (!settings.autoGameModel) return;
+  if (!game.on) { bootLoad(true); return; }
   // The game wants the memory the big model is using: stop thinking.
   if (think.job) thinkCancel("a game started");
   if (!(await localProbe(true))) return;
-  if (local.loaded && local.loaded !== "jarvis-4b") {
+  if (local.loaded && local.loaded !== settings.gameModel) {
     try {
       await fetch(settings.localUrl.replace(/\/+$/, "") + "/models/unload", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -610,6 +625,28 @@ async function onGameChange() {
       local.loaded = null;
     } catch (e) { /* the router unloads on idle anyway */ }
   }
+}
+
+// The model Jarvis starts with: once the router is up (when the panel starts,
+// or whenever the router comes up later), the everyday model is loaded so the
+// first question doesn't wait for it; in a game, the gaming model instead.
+// Nothing happens while the big model thinks or another model is in use.
+let bootT = 0;
+async function bootLoad(force) {
+  if (!settings.bootModel || think.job || turnsActive > 0) return;
+  if (!force && Date.now() - bootT < 60000) return;
+  bootT = Date.now();
+  if (!(await localProbe(true))) return;
+  const want = localModelNow();
+  if (local.loaded === want || !local.served.includes(want)) return;
+  if (local.loaded && !force) return;
+  try {
+    await fetch(settings.localUrl.replace(/\/+$/, "") + "/models/load", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: want }),
+    });
+    broadcast({ type: "status", status: status() });
+  } catch (e) { /* it loads on the first question instead */ }
 }
 
 function localStart() {
@@ -695,10 +732,10 @@ async function thinkComplete(base, prompt, nPredict, signal, onPiece) {
   if (!res.ok) throw new Error("the model server said " + res.status + ": " + (await res.text().catch(() => "")).slice(0, 160));
   const reader = res.body.getReader();
   const dec = new TextDecoder();
-  let buf = "";
+  let buf = "", timings = null;
   for (;;) {
     const { value, done } = await reader.read();
-    if (done) return;
+    if (done) return timings;
     buf += dec.decode(value, { stream: true });
     let i;
     while ((i = buf.indexOf("\n")) >= 0) {
@@ -708,8 +745,9 @@ async function thinkComplete(base, prompt, nPredict, signal, onPiece) {
       let j;
       try { j = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
       if (j.error) throw new Error(j.error.message || "model error");
+      if (j.timings) timings = j.timings;
       if (j.content) onPiece(j.content);
-      if (j.stop) return;
+      if (j.stop) return timings;
     }
   }
 }
@@ -881,8 +919,10 @@ async function thinkRun(job) {
     const pass1 = new AbortController();
     const onAbort = () => pass1.abort();
     job.ctl.signal.addEventListener("abort", onAbort);
+    // What it read, for the usage stats (exact when the server says).
+    job.inTok = Math.round(prompt.length / 3.6);
     try {
-      await thinkComplete(base, prompt, budget + THINK_ANSWER_TOKENS, pass1.signal, (piece) => {
+      job.t1 = await thinkComplete(base, prompt, budget + THINK_ANSWER_TOKENS, pass1.signal, (piece) => {
         job.tokens++;
         if (inThink) {
           thought += piece;
@@ -897,13 +937,15 @@ async function thinkRun(job) {
     } catch (e) {
       if (!(e.name === "AbortError" && !job.ctl.signal.aborted)) throw e;
     } finally { job.ctl.signal.removeEventListener("abort", onAbort); }
+    if (job.t1) { job.inTok = (job.t1.prompt_n | 0) + (job.t1.cache_n | 0); job.cachedTok = job.t1.cache_n | 0; }
     local.loaded = settings.thinkModel;
 
     // Budget spent mid-thought: close it and write the answer.
     if (inThink) {
       job.phase = "writing";
       const prompt2 = prompt + thought.replace(/\s+$/, "") + THINK_ENOUGH + "</think>\n\n";
-      await thinkComplete(base, prompt2, THINK_ANSWER_TOKENS, job.ctl.signal, (piece) => { job.tokens++; content += piece; });
+      const t2 = await thinkComplete(base, prompt2, THINK_ANSWER_TOKENS, job.ctl.signal, (piece) => { job.tokens++; content += piece; });
+      if (t2) { job.inTok += (t2.prompt_n | 0) + (t2.cache_n | 0); job.cachedTok = (job.cachedTok | 0) + (t2.cache_n | 0); }
     }
   } catch (e) {
     error = job.cancelled ? null : (e.name === "AbortError" ? "it was stopped" : e.message);
@@ -913,6 +955,9 @@ async function thinkRun(job) {
   }
   const seconds = Math.round((Date.now() - job.started) / 1000);
   think.job = null;
+  if (job.tokens || job.inTok) {
+    usage.request({ kind: "think", provider: "local", model: settings.thinkModel, chatId: job.conv && job.conv.chatId, in: job.inTok, cached: job.cachedTok | 0, out: job.tokens, ms: seconds * 1000, genMs: seconds * 1000, window: ctxWindow(settings.thinkModel) });
+  }
   if (job.cancelled) { thinkBroadcast("cancelled", { question: job.asked || job.question, why: job.cancelled }); return; }
   if (error || !content.trim()) { thinkBroadcast("failed", { question: job.asked || job.question, error: error || "it came back empty" }); return; }
 
@@ -933,6 +978,7 @@ async function thinkRun(job) {
   const chatId = (job.conv && job.conv.chatId && chats.get(job.conv.chatId)) ? job.conv.chatId : chats.create({ kind: "topic", title: chats.roughTitle(job.asked || job.question) }).id;
   const turn = {
     at: Date.now(), heard: job.asked || "Think hard: " + job.question, reply: answer, tools: ["think_hard"], cards: [], model: settings.thinkModel, ok: true,
+    usage: { in: job.inTok | 0, cached: job.cachedTok | 0, out: job.tokens, requests: 1, toolCalls: 0, toolFails: 0, ms: seconds * 1000 },
     think: { seconds, tokens: job.tokens, reasoningTokens: reasoning, effort: job.effort, warm: job.warm || null },
   };
   const chat = chats.addTurn(chatId, turn);
@@ -1415,13 +1461,22 @@ const TOOLS = [
     },
   },
 ];
+TOOLS.push(...fileTools.TOOL_DEFS);
 const toolByName = new Map(TOOLS.map((t) => [t.name, t]));
 
+// Tools the user can switch off: think_hard (off by default) and the file
+// system ones. Off means the model is never told about them.
+function toolOn(t) {
+  const name = typeof t === "string" ? t : t.name;
+  if (name === "think_hard") return !!settings.thinkHard;
+  if (name === "files" || name === "repo") return settings.files !== "off";
+  return true;
+}
 function claudeTools() {
-  return TOOLS.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema }));
+  return TOOLS.filter(toolOn).map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema }));
 }
 function openaiTools(all) {
-  return TOOLS.filter((t) => all || t.core).map((t) => ({
+  return TOOLS.filter((t) => (all || t.core) && toolOn(t)).map((t) => ({
     type: "function",
     function: { name: t.name, description: t.description, parameters: t.input_schema },
   }));
@@ -2066,8 +2121,11 @@ async function runServerTool(name, input, emit, conv) {
       if (a.action === "read") return [numbered(text) || "(the notes are empty)"];
       return [r.msg + "\nThe notes now:\n" + (numbered(text) || "(empty)")];
     }
-    case "think_hard": return thinkStart(a, conv);
+    case "think_hard":
+      if (!settings.thinkHard) return ["Thinking hard (the big model) is switched off in Jarvis settings. Answer it yourself.", true];
+      return thinkStart(a, conv);
     case "history": return historyTool(a, emit, conv);
+    case "files": case "repo": return fsTool(name, a, emit, conv);
     case "info": {
       const r = await info(String(a.about || "everything"), a);
       return [JSON.stringify(r), !!(r && r.error)];
@@ -2125,6 +2183,8 @@ function who() { return settings.name || "the user"; }
 const TOOL_GUIDE = {
   look: "anything about what is on the user's screen: \"what am I looking at\", \"answer these questions\", \"what does this error say\", \"help me with this\". It answers in full in the Chat app; you say the gist",
   history: "anything from a past conversation the memory guide does not spell out (what was said, decided, recommended, when), or to go back to an older chat or start a fresh one",
+  files: "anything about files and folders on the PC: what is in a folder, find a file, read or summarise one, write or change one, make, move, copy or delete things",
+  repo: "code projects: what a repo is and its state (overview first), git (status, log, diff, commit, branches, push, clone), a new repo, a new GitHub repo",
   think_hard: "a question that needs real thought (hard reasoning, maths, code, planning, a decision, a proper explanation), or when asked to think hard or take your time: the big model works on it and the answer comes later",
   info: "anything about the PC (CPU, GPU, temperatures, power draw, fan speeds, drives' temperature, space and health, memory, network, what is running, uptime; about sensors for any single reading), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
   panel: "this app itself: check for or install updates, switch forks, a theme, your own settings, reload; the PC's screensaver (\"screensaver\", \"go to sleep\" for the screens); Wallpaper Engine (next wallpaper, pause it)",
@@ -2153,6 +2213,9 @@ const TOOL_GUIDE = {
 const TOOL_EXAMPLES = [
   ["turn it down a bit", "volume {action: down}", "then say the new level it returned"],
   ["what did we decide about the bike battery last week?", "history {action: search, query: bike battery decision}", "then answer from what it found, with when"],
+  ["what's in my Downloads folder?", "files {action: list, path: ~\\Downloads}", "then the gist"],
+  ["make a notes file on my desktop with that list", "files {action: write, path: ~\\Desktop\\notes.txt, content: ...}", ""],
+  ["what's going on in my dashboard repo?", "repo {action: overview, path: C:\\Users\\...\\hytenexusspotify}", "then read files if asked about the code"],
   ["is something hogging my GPU?", "info {about: pc}", "then answer from the GPU numbers and the busiest programs"],
   ["think hard about whether I should get 96 GB of RAM or a second GPU for local AI", "think_hard {question: \"Should Cappy upgrade to 96 GB of RAM or add a second GPU (RTX 3070 Ti) for running local AI models? ...everything relevant you know...\"}", "then just \"On it, I'll let you know.\""],
   ["how fast are my fans spinning?", "info {about: sensors, find: fan}", "then the speeds it returned, and say so if some read 0 (stopped, or not readable)"],
@@ -2178,7 +2241,7 @@ function systemPrompt(small) {
   const addr = settings.addressAs ? " Address them as \"" + settings.addressAs + "\"." : "";
   const facts = graphMode() ? [] : loadFacts();
   const graph = graphSummary();
-  const have = TOOLS.filter((t) => !small || t.core).map((t) => t.name);
+  const have = TOOLS.filter((t) => (!small || t.core) && toolOn(t)).map((t) => t.name);
   const guide = have.filter((n) => TOOL_GUIDE[n]).map((n) => "- " + n + ": " + TOOL_GUIDE[n]);
   const examples = TOOL_EXAMPLES
     .filter(([, call]) => have.some((n) => call.startsWith(n + " ")))
@@ -2218,6 +2281,7 @@ function systemPrompt(small) {
     "- A conversation that continues an older chat starts with that chat's latest exchanges, named up front. If " + who() + " clearly means a different past conversation, open it with history.",
     "- When " + who() + " tells you something worth keeping for good, remember it (that memory is shared with their other assistant); recall looks things up there.",
   ];
+  if (toolOn("files")) parts.push("- Files: " + who() + "'s home folder is " + os.homedir() + " (~). Their projects are mostly under " + path.join(os.homedir(), "Documents") + ". When a change waits for their OK on the panel, say so in a few words; if they say no, leave it.");
   if (settings.about) parts.push("", "About " + who() + ":", settings.about);
   if (facts.length) parts.push("", "Things you have been asked to remember:", facts.map((f) => "- " + f.text).join("\n"));
   if (graph) parts.push("", "What the shared memory knows:", small ? graph.slice(0, 2500) + (graph.length > 2500 ? "\n(more: use recall)" : "") : graph);
@@ -2250,6 +2314,35 @@ function claudeClient() {
 
 class UserFacing extends Error {}
 
+// ---- meters: what a turn is using, live ---------------------------------------------
+// The context window each model has: a local one's ctx-size in
+// jarvis-models.ini, Claude's 200k.
+function ctxWindow(model) {
+  if (/^claude/.test(String(model))) return 200000;
+  const m = models.readIni(settings).find((x) => x.id === model);
+  return (m && m.ctx) || 0;
+}
+// Sent to the panel (and, a few times a second at most, to the Chat app):
+// stage reading (the prompt, ctx = its size, est while it's a guess) or
+// writing (out so far, tok/s), and the turn's running totals.
+let meterAt = 0;
+function meter(conv, emit, m) {
+  const u = (conv.log && conv.log.usage) || {};
+  // Between requests (a tool running, the end) the context is what it last was.
+  if (m.ctx != null) { conv.meterCtx = m.ctx; conv.meterWindow = m.window; conv.meterModel = m.model; conv.meterEst = !!m.est; }
+  const ev = {
+    type: "meter", conv: conv.id, stage: m.stage, model: m.model || conv.meterModel, window: (m.window != null ? m.window : conv.meterWindow) | 0,
+    ctx: (m.ctx != null ? m.ctx : conv.meterCtx) | 0, est: m.ctx != null ? !!m.est : !!conv.meterEst, out: m.out | 0, tps: m.tps ? Math.round(m.tps * 10) / 10 : 0,
+    step: u.requests | 0, turnIn: u.in | 0, turnCached: u.cached | 0, turnOut: u.out | 0,
+    toolCalls: u.toolCalls | 0, toolFails: u.toolFails | 0,
+    elapsed: conv.log && conv.log.at ? Date.now() - conv.log.at : 0,
+  };
+  emit(ev);
+  const now = Date.now();
+  if (m.stage !== "writing" || now - meterAt > 300) { meterAt = now; broadcast(ev); }
+}
+function freshUsage() { return { in: 0, cached: 0, out: 0, requests: 0, toolCalls: 0, toolFails: 0, ms: 0 }; }
+
 async function claudeStep(conv, emit, signal, noTools) {
   if (!Anthropic) throw new UserFacing("The Anthropic SDK is missing from this build.");
   const c = claudeClient();
@@ -2265,6 +2358,10 @@ async function claudeStep(conv, emit, signal, noTools) {
   // The history holds tool calls, so the tools must stay declared; "none"
   // just stops new ones.
   if (noTools) params.tool_choice = { type: "none" };
+  const window = ctxWindow(model);
+  const t0 = Date.now();
+  let firstAt = 0, outChars = 0, lastMeter = 0;
+  meter(conv, emit, { stage: "reading", model, window, ctx: Math.round(JSON.stringify(params.system).length / 3.6 + JSON.stringify(params.messages).length / 3.6 + JSON.stringify(params.tools).length / 3.6), est: true });
   let stream;
   if (model === "claude-haiku-4-5") {
     stream = c.messages.stream(params, { signal });
@@ -2278,10 +2375,32 @@ async function claudeStep(conv, emit, signal, noTools) {
       fallbacks: "default",
     }, { signal });
   }
-  stream.on("text", (delta) => emit({ type: "text", delta }));
+  let readIn = 0;
+  // message_start says exactly how big the prompt was.
+  stream.on("streamEvent", (ev) => {
+    if (ev.type === "message_start" && ev.message && ev.message.usage) {
+      const u = ev.message.usage;
+      readIn = (u.input_tokens | 0) + (u.cache_read_input_tokens | 0) + (u.cache_creation_input_tokens | 0);
+      meter(conv, emit, { stage: "reading", model, window, ctx: readIn });
+    }
+  });
+  stream.on("text", (delta) => {
+    emit({ type: "text", delta });
+    if (!firstAt) firstAt = Date.now();
+    outChars += delta.length;
+    if (Date.now() - lastMeter > 250) {
+      lastMeter = Date.now();
+      const out = Math.round(outChars / 4);
+      meter(conv, emit, { stage: "writing", model, window, ctx: readIn + out, out, tps: out / Math.max(0.2, (Date.now() - firstAt) / 1000) });
+    }
+  });
   try {
     const msg = await stream.finalMessage();
-    return { content: msg.content, stop: msg.stop_reason, model: msg.model, usage: msg.usage };
+    const u = msg.usage || {};
+    const inTok = (u.input_tokens | 0) + (u.cache_read_input_tokens | 0) + (u.cache_creation_input_tokens | 0);
+    const ms = Date.now() - t0;
+    const use = { in: inTok, cached: u.cache_read_input_tokens | 0, out: u.output_tokens | 0, ms, promptMs: firstAt ? firstAt - t0 : ms, genMs: firstAt ? Date.now() - firstAt : 0, window };
+    return { content: msg.content, stop: msg.stop_reason, model: msg.model, usage: use };
   } catch (e) {
     if (e instanceof Anthropic.AuthenticationError) throw new UserFacing("Claude rejected the API key. Check it in Jarvis settings.");
     if (e instanceof Anthropic.RateLimitError) throw new UserFacing("Claude is rate limiting me. Try again in a moment.");
@@ -2324,6 +2443,13 @@ async function localStep(conv, emit, signal, noTools) {
   const ini = models.readIni(settings).find((m) => m.id === model);
   const big = isBig(model, ini && ini.file);
   if (local.loaded !== model) emit({ type: "status", text: "Waking " + model + "…" });
+  const messages = toOpenAI(systemPrompt(!big), withNudge(conv.messages, conv.nudge));
+  const tools = openaiTools(big);
+  const window = ctxWindow(model);
+  // A guess at the prompt's size until the server says (about 3.6 characters a token).
+  const estIn = Math.round((JSON.stringify(messages).length + JSON.stringify(tools).length) / 3.6);
+  const t0 = Date.now();
+  meter(conv, emit, { stage: "reading", model, window, ctx: estIn, est: true });
   let res;
   try {
     res = await fetch(base + "/v1/chat/completions", {
@@ -2334,8 +2460,8 @@ async function localStep(conv, emit, signal, noTools) {
         model,
         stream: true,
         max_tokens: 1500,
-        messages: toOpenAI(systemPrompt(!big), withNudge(conv.messages, conv.nudge)),
-        tools: openaiTools(big),
+        messages,
+        tools,
         tool_choice: noTools ? "none" : "auto",
         chat_template_kwargs: { enable_thinking: false },
       }),
@@ -2352,8 +2478,17 @@ async function localStep(conv, emit, signal, noTools) {
   local.loaded = model;
   const reader = res.body.getReader();
   const dec = new TextDecoder();
-  let buf = "", text = "", finish = null;
+  let buf = "", text = "", finish = null, timings = null, firstAt = 0, pieces = 0, lastMeter = 0;
   const calls = [];
+  // Each streamed piece is about one token.
+  const wrote = () => {
+    pieces++;
+    if (!firstAt) firstAt = Date.now();
+    if (Date.now() - lastMeter > 250) {
+      lastMeter = Date.now();
+      meter(conv, emit, { stage: "writing", model, window, ctx: estIn + pieces, est: true, out: pieces, tps: pieces / Math.max(0.2, (Date.now() - firstAt) / 1000) });
+    }
+  };
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -2370,12 +2505,16 @@ async function localStep(conv, emit, signal, noTools) {
       if (j.error) throw new UserFacing("Local model error: " + (j.error.message || "unknown"));
       // llama-server puts its own timings on the last chunk: how much of the
       // prompt it had to read (vs reuse from cache) and how fast it wrote.
-      if (j.timings) emit({ type: "timings", prompt: j.timings.prompt_n, cached: j.timings.cache_n, promptMs: Math.round(j.timings.prompt_ms), genMs: Math.round(j.timings.predicted_ms), tokens: j.timings.predicted_n });
+      if (j.timings) {
+        timings = j.timings;
+        emit({ type: "timings", prompt: j.timings.prompt_n, cached: j.timings.cache_n, promptMs: Math.round(j.timings.prompt_ms), genMs: Math.round(j.timings.predicted_ms), tokens: j.timings.predicted_n });
+      }
       const ch = j.choices && j.choices[0];
       if (!ch) continue;
       const d = ch.delta || {};
-      if (d.content) { text += d.content; emit({ type: "text", delta: d.content }); }
+      if (d.content) { text += d.content; emit({ type: "text", delta: d.content }); wrote(); }
       for (const tc of d.tool_calls || []) {
+        wrote();
         const c = calls[tc.index] || (calls[tc.index] = { id: "", name: "", args: "" });
         if (tc.id) c.id = tc.id;
         if (tc.function && tc.function.name) c.name += tc.function.name;
@@ -2392,7 +2531,12 @@ async function localStep(conv, emit, signal, noTools) {
     content.push({ type: "tool_use", id: c.id || "call_" + Math.random().toString(36).slice(2, 10), name: c.name, input });
   }
   const stop = content.some((b) => b.type === "tool_use") ? "tool_use" : (finish === "length" ? "max_tokens" : "end_turn");
-  return { content, stop, model };
+  // The server's own count when it gave one (it always does today), else ours.
+  const ms = Date.now() - t0;
+  const use = timings
+    ? { in: (timings.prompt_n | 0) + (timings.cache_n | 0), cached: timings.cache_n | 0, out: timings.predicted_n | 0, ms, promptMs: Math.round(timings.prompt_ms || 0), genMs: Math.round(timings.predicted_ms || 0), window }
+    : { in: estIn, cached: 0, out: pieces, ms, promptMs: firstAt ? firstAt - t0 : ms, genMs: firstAt ? Date.now() - firstAt : 0, window, est: true };
+  return { content, stop, model, usage: use };
 }
 
 async function chooseProvider() {
@@ -2502,10 +2646,17 @@ async function runLoop(conv, emit, signal) {
     const heard = conv.log.heard || "";
     // Asked to think hard, the 9B tends to start answering itself before it
     // hands over: hold its words, and drop them if it does hand over.
-    const thinkAsk = step === 0 && THINK_WORDS.test(heard);
+    const thinkAsk = step === 0 && !!settings.thinkHard && THINK_WORDS.test(heard);
     const hold = { claims: watch, all: (watch && LIVE.test(heard) && !KNOWLEDGE.test(heard)) || thinkAsk };
     const h = honestEmit(emit, hold);
     const r = provider === "claude" ? await claudeStep(conv, h.emit, signal, last) : await localStep(conv, h.emit, signal, last);
+    // Every request counts, a retried one too: it was spent.
+    if (r.usage) {
+      const u = conv.log.usage || (conv.log.usage = freshUsage());
+      u.in += r.usage.in; u.cached += r.usage.cached; u.out += r.usage.out; u.requests++; u.ms += r.usage.ms;
+      usage.request({ kind: "turn", provider, model: r.model, chatId: conv.chatId, ...r.usage });
+      meter(conv, emit, { stage: "step", model: r.model, window: r.usage.window, ctx: r.usage.in + r.usage.out, out: r.usage.out, tps: r.usage.genMs ? r.usage.out / (r.usage.genMs / 1000) : 0 });
+    }
     const usedTool = r.content.some((b) => b.type === "tool_use");
     if (r.content.some((b) => b.type === "tool_use" && b.name === "think_hard")) {
       r.content = r.content.filter((b) => b.type !== "text");
@@ -2550,6 +2701,7 @@ async function runLoop(conv, emit, signal) {
     }
     const results = await Promise.all(serverUses.map(async (u) => {
       emit({ type: "tool", id: u.id, name: u.name, input: u.input, status: "running" });
+      const tStart = Date.now();
       let out, isErr = false;
       try {
         if (!toolByName.has(u.name)) [out, isErr] = ["There is no tool called " + u.name, true];
@@ -2565,6 +2717,8 @@ async function runLoop(conv, emit, signal) {
       } catch (e) { out = "Tool failed: " + e.message; isErr = true; }
       emit({ type: "tool", id: u.id, name: u.name, status: "done", ok: !isErr });
       if (isErr) conv.log.failed = true;
+      countTool(conv, u.name, !isErr, Date.now() - tStart);
+      meter(conv, emit, { stage: "tool", model: conv.model });
       return { type: "tool_result", tool_use_id: u.id, content: String(out == null ? "" : out), ...(isErr ? { is_error: true } : {}) };
     }));
 
@@ -2584,7 +2738,7 @@ async function runLoop(conv, emit, signal) {
     }
 
     if (clientUses.length) {
-      conv.pending = { results, ids: clientUses.map((u) => u.id), order: uses.map((u) => u.id) };
+      conv.pending = { results, ids: clientUses.map((u) => u.id), order: uses.map((u) => u.id), names: Object.fromEntries(clientUses.map((u) => [u.id, u.name])), at: Date.now() };
       emit({ type: "client", calls: clientUses.map((u) => ({ id: u.id, name: u.name, input: u.input })) });
       return "client";
     }
@@ -2594,17 +2748,28 @@ async function runLoop(conv, emit, signal) {
   return "end";
 }
 
+function countTool(conv, name, ok, ms) {
+  const u = conv.log && (conv.log.usage || (conv.log.usage = freshUsage()));
+  if (u) { u.toolCalls++; if (!ok) u.toolFails++; }
+  usage.tool({ name, ok, ms, chatId: conv.chatId });
+}
+
 function finish(conv, emit) {
+  const u = conv.log.usage || freshUsage();
+  const took = conv.log.at ? Date.now() - conv.log.at : 0;
+  meter(conv, emit, { stage: "done", model: conv.model });
   addHistory({
     at: Date.now(), conv: conv.id, heard: conv.log.heard, reply: conv.log.reply.trim(),
     provider: conv.provider, model: conv.model || null, tools: conv.log.tools,
     // What he first said instead of using a tool, when the reminder caught it.
     ...(conv.nudged ? { caught: conv.nudged.said } : {}),
   });
-  fileTurn(conv, {
+  const chat = fileTurn(conv, {
     at: Date.now(), heard: conv.log.heard, reply: conv.log.reply.trim(), tools: [...new Set(conv.log.tools)],
     cards: (conv.log.cards || []).slice(0, 6), model: conv.model || null, ok: !conv.log.failed,
+    usage: { ...u, ms: took },
   });
+  usage.turn({ chatId: chat ? chat.id : conv.chatId, ms: took, ok: !conv.log.failed, steps: u.requests, in: u.in, out: u.out });
   emit({ type: "done", conv: conv.id, chat: conv.chatId || null });
 }
 
@@ -2718,6 +2883,61 @@ function historyTool(a, emit, conv) {
   return ["unknown history action " + act, true];
 }
 
+// ---- files and repos: asking first ----------------------------------------------------
+// Each request waits for a tap on the panel (or in the Chat app): Allow, Allow
+// for this conversation, or No. Two minutes without an answer is a no. The
+// setting decides what asks: "ask" changes only, "askall" reading too,
+// "bypass" nothing (the places assistant-files.js never touches still hold).
+const perms = new Map();          // id -> { resolve, req, conv }
+const PERM_WAIT_MS = 2 * 60 * 1000;
+function askPermission(conv, emit, req) {
+  const mode = settings.files;
+  if (mode === "off") return Promise.resolve(false);
+  if (mode === "bypass") return Promise.resolve(true);
+  if (!req.write && mode === "ask") return Promise.resolve(true);
+  if (conv && conv.fsAllow && (conv.fsAllow === "all" || (!req.write && conv.fsAllow === "read"))) return Promise.resolve(true);
+  const id = "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const ev = { type: "permission", id, tool: req.tool, action: req.action, write: !!req.write, title: req.title, path: req.path, detail: String(req.detail || "").slice(0, 1500), at: Date.now(), timeout: PERM_WAIT_MS };
+  emit({ type: "status", text: "Waiting for your OK on the panel…" });
+  emit(ev);
+  broadcast(ev);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => settlePermission(id, "timeout"), PERM_WAIT_MS);
+    perms.set(id, { resolve, req, conv, timer, emit });
+  });
+}
+// answer: "allow" | "always" (this conversation) | "deny" | "timeout"
+function settlePermission(id, answer) {
+  const p = perms.get(id);
+  if (!p) return false;
+  perms.delete(id);
+  clearTimeout(p.timer);
+  const ok = answer === "allow" || answer === "always";
+  if (answer === "always" && p.conv) p.conv.fsAllow = "all";
+  const done = { type: "permission-done", id, answer, allowed: ok };
+  try { p.emit(done); p.emit({ type: "status", text: "" }); } catch (e) {}
+  broadcast(done);
+  p.resolve(ok);
+  return true;
+}
+
+async function fsTool(name, a, emit, conv) {
+  if (settings.files === "off") return ["Files access is switched off in Jarvis settings.", true];
+  const ctx = {
+    cwd: conv && conv.fsCwd,
+    // What a read may return: a small local model has a small context.
+    limit: conv && conv.provider === "claude" ? 30000 : 9000,
+    ask: (req) => askPermission(conv, emit, req),
+  };
+  try {
+    const r = name === "files" ? await fileTools.files(a, ctx) : await fileTools.repo(a, ctx);
+    if (conv && ctx.cwd) conv.fsCwd = ctx.cwd;
+    return r;
+  } catch (e) {
+    return [(e.code === "EACCES" || e.code === "EPERM" ? "Windows won't let me: " : "That failed: ") + e.message, true];
+  }
+}
+
 const ago = (t) => {
   const d = Math.round((Date.now() - t) / 86400000);
   return d <= 0 ? "earlier today" : d === 1 ? "yesterday" : d < 14 ? d + " days ago" : new Date(t).toLocaleDateString("en-US", { month: "long", day: "numeric" });
@@ -2741,7 +2961,11 @@ async function handleTurn(req, res) {
     res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache" });
     const ctl = new AbortController();
     let closed = false;
-    res.on("close", () => { closed = true; ctl.abort(); });
+    res.on("close", () => {
+      closed = true; ctl.abort();
+      // Nobody is there to say yes any more.
+      for (const [id, p] of perms) if (p.conv && p.conv === conv) settlePermission(id, "deny");
+    });
     const emit = (ev) => { if (!closed) { try { res.write(JSON.stringify(ev) + "\n"); } catch (e) {} } };
 
     let conv = body.conv && convs.get(body.conv);
@@ -2762,6 +2986,11 @@ async function handleTurn(req, res) {
           if (!byId.has(id)) byId.set(id, { type: "tool_result", tool_use_id: id, content: "no result", is_error: true });
         }
         if (conv.log && [...byId.values()].some((r) => r.is_error)) conv.log.failed = true;
+        // The panel's tools count too (timed from when they were handed over).
+        for (const id of conv.pending.ids) {
+          const r = byId.get(id);
+          countTool(conv, (conv.pending.names || {})[id] || "client", !(r && r.is_error), Date.now() - (conv.pending.at || Date.now()));
+        }
         conv.messages.push({ role: "user", content: conv.pending.order.map((id) => byId.get(id)).filter(Boolean) });
         conv.pending = null;
       } else {
@@ -2786,7 +3015,7 @@ async function handleTurn(req, res) {
         }
         // A provider switch mid-conversation is fine, but pick once per turn.
         conv.provider = await chooseProvider();
-        conv.log = { heard: text, reply: "", tools: [], cards: [] };
+        conv.log = { heard: text, reply: "", tools: [], cards: [], at: Date.now(), usage: freshUsage() };
         conv.searches = 0;
         conv.nudged = null; conv.nudge = null;
         // A new conversation: does it continue a chat? Its history comes first.
@@ -2813,6 +3042,11 @@ async function handleTurn(req, res) {
         const msg = e instanceof UserFacing ? e.message : "Something went wrong: " + e.message;
         if (!(e instanceof UserFacing)) console.error("Jarvis turn failed:", e);
         emit({ type: "error", message: msg });
+        if (conv && conv.log && conv.log.at) {
+          const u = conv.log.usage || freshUsage();
+          usage.turn({ chatId: conv.chatId, ms: Date.now() - conv.log.at, ok: false, steps: u.requests, in: u.in, out: u.out });
+          meter(conv, emit, { stage: "done", model: conv.model });
+        }
         // A basic command that failed still counts, as a failure.
         if (conv && conv.log) {
           const key = chats.classify(conv.log.heard, conv.log.tools);
@@ -2976,6 +3210,22 @@ async function handle(req, res, urlPath) {
       }
     }
   }
+  // Usage: today, this month, all time, per day and month, the latest events.
+  if (sub.startsWith("usage") && req.method === "GET") {
+    const q = new URL(req.url, "http://x").searchParams;
+    return json(res, 200, usage.summary({ day: q.get("day") || undefined, month: q.get("month") || undefined }));
+  }
+  // An answer to "can I…?" from the panel or the Chat app.
+  const pm = /^permission\/(p[a-z0-9]+)$/.exec(sub);
+  if (pm && req.method === "POST") {
+    return H.readJsonBody(req, res, (b) => {
+      const answer = ["allow", "always", "deny"].includes(b && b.answer) ? b.answer : "deny";
+      return json(res, 200, { ok: settlePermission(pm[1], answer) });
+    });
+  }
+  if (sub === "permissions" && req.method === "GET") {
+    return json(res, 200, { ok: true, pending: [...perms].map(([id, p]) => ({ id, ...p.req, detail: String(p.req.detail || "").slice(0, 1500) })) });
+  }
   // The latest exchanges, whichever chat they are in (older panels ask this).
   if (sub === "chat" && req.method === "GET") return json(res, 200, { ok: true, entries: chats.latest(60) });
   if (sub.startsWith("capture/") && req.method === "GET") {
@@ -3105,7 +3355,16 @@ function init(host) {
   // Load the voice now, so the first answer is not the one that waits for it.
   if (ttsEngine() === "kokoro") setTimeout(kokoroStart, 2500);
   // Keep the local model's status fresh for the panel without a request.
-  setInterval(() => { localProbe(true).then(() => broadcast({ type: "status", status: status() })); }, 15000).unref();
+  // When the router comes up (now, or later), the everyday model goes in.
+  let wasUp = false;
+  setInterval(() => {
+    localProbe(true).then((up) => {
+      broadcast({ type: "status", status: status() });
+      if (up && !wasUp) bootLoad();
+      wasUp = up;
+    });
+  }, 15000).unref();
+  setTimeout(() => bootLoad(), 4000);
   // While anything is downloading, the island shows its progress.
   setInterval(() => {
     const live = models.list().filter((d) => !d.registered && !d.error);
@@ -3113,6 +3372,8 @@ function init(host) {
   }, 2000).unref();
   migrateFacts().catch(() => {});
   // The data bank (every exchange, filed into chats) and the memory guide.
+  usage.init(H.DATA);
+  fileTools.init(H.DATA);
   const imported = chats.init(H.DATA);
   memory.init(H.DATA, {
     llm: quickJson,
@@ -3144,10 +3405,12 @@ function init(host) {
 async function quickJson(system, user, schema, maxTokens) {
   if (await localProbe(false)) {
     try {
+      const model = localModelNow();
+      const t0 = Date.now();
       const r = await fetch(settings.localUrl.replace(/\/+$/, "") + "/v1/chat/completions", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: localModelNow(), max_tokens: maxTokens || 800, temperature: 0.2,
+          model, max_tokens: maxTokens || 800, temperature: 0.2,
           messages: [{ role: "system", content: system }, { role: "user", content: user }],
           response_format: { type: "json_schema", json_schema: { name: "out", schema } },
           chat_template_kwargs: { enable_thinking: false },
@@ -3155,6 +3418,12 @@ async function quickJson(system, user, schema, maxTokens) {
       });
       if (r.ok) {
         const j = await r.json();
+        const tm = j.timings, uj = j.usage || {};
+        usage.request({
+          kind: "notes", provider: "local", model, window: ctxWindow(model), ms: Date.now() - t0,
+          in: tm ? (tm.prompt_n | 0) + (tm.cache_n | 0) : uj.prompt_tokens | 0, cached: tm ? tm.cache_n | 0 : 0,
+          out: tm ? tm.predicted_n | 0 : uj.completion_tokens | 0, promptMs: tm ? Math.round(tm.prompt_ms) : 0, genMs: tm ? Math.round(tm.predicted_ms) : 0,
+        });
         const text = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
         if (text) return JSON.parse(text);
       }
@@ -3163,10 +3432,14 @@ async function quickJson(system, user, schema, maxTokens) {
   const c = claudeClient();
   if (c) {
     try {
+      const t0 = Date.now();
       const r = await c.messages.create({
         model: "claude-haiku-4-5", max_tokens: maxTokens || 800, system: system + "\nAnswer with the JSON object only.",
         messages: [{ role: "user", content: user + "\n\nJSON schema:\n" + JSON.stringify(schema) }],
       });
+      const u = r.usage || {};
+      usage.request({ kind: "notes", provider: "claude", model: "claude-haiku-4-5", window: 200000, ms: Date.now() - t0,
+        in: (u.input_tokens | 0) + (u.cache_read_input_tokens | 0) + (u.cache_creation_input_tokens | 0), cached: u.cache_read_input_tokens | 0, out: u.output_tokens | 0 });
       const text = (r.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
       const m = text.match(/\{[\s\S]*\}/);
       if (m) return JSON.parse(m[0]);

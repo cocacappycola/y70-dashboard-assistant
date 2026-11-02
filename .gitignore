@@ -33,3 +33,8 @@ voice/bin/
 voice/obj/
 captures/
 jarvis-chat.json
+jarvis-chat.imported.json
+jarvis-chats/
+jarvis-memory-guide.json
+jarvis-memory-guide.md
+jarvis-usage/

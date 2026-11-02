@@ -69,6 +69,8 @@
           "assistant-models.js",
           "assistant-chats.js",
           "assistant-memory.js",
+          "assistant-files.js",
+          "assistant-usage.js",
           "govee.js",
           "lhm.js",
           "tts-kokoro.py"

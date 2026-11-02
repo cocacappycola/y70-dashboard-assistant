@@ -36,6 +36,7 @@ answers out loud, puts anything worth seeing on the panel, and can do things:
 | "What am I looking at?" / "answer these questions" / "what does this error mean?" | Looks at the window in front (or the whole main screen), answers in a sentence, and opens the **Chat** app with the screenshot and the full answer |
 | "Ember theme" / "open your settings" | Themes, its settings and start-up options |
 | "Remember that…" | Shared memory |
+| "What's in my Downloads?" / "make a notes file on my desktop" / "what's going on in my dashboard repo?" / "commit that" | Files and repos anywhere on the PC; changes wait for your Allow on the panel unless you set Bypass |
 | "What did we decide about the bike battery?" / "pull up our chat about the camping trip" / "start a new chat" | Every conversation is kept in a searchable bank of chats; he finds what was said, or opens that chat on screen and carries on in it |
 | "Lights purple" / "lights off" / "dim the lights to 30" | Your Govee strip: over the LAN when it has LAN control, Govee's cloud when it is Wi-Fi only |
 | "Download Qwen 3.5 27B" / "find me a coding model" | Finds GGUF builds on Hugging Face, opens the page, downloads after you tap |
@@ -184,9 +185,12 @@ black; borderless is fine.
 what he looked at (screenshot, tap to enlarge, and the full written answer),
 what he found — live as it happens, with a box to type to him. It opens by
 itself after a look; he says the gist out loud. It follows the chat he is in
-(below); **Chats** lists and searches them all, **New** starts a fresh one,
-**Memory** shows his memory guide, and Delete (tap twice) removes the chat on
-screen with its screenshots. Typing goes into the chat on screen. Screenshots
+(below). Tabs: **Chat**, **Chats** (lists and searches them all), **Memory**
+(his memory guide) and **Stats** (usage, below); **New** starts a fresh chat
+and Delete (tap twice) removes the one on screen with its screenshots. Each
+chat's header shows what it has used (tokens in and out, requests, tool
+calls), each answer its own, and while he works his bubble has the live
+meter. Typing goes into the chat on screen. Screenshots
 are in `captures/` in the data folder, kept with their chats up to 1 GB (past
 that the oldest pictures go; their written answers stay), never served except
 through `/api/jarvis/capture/...` on 127.0.0.1.
@@ -238,7 +242,77 @@ exchanges at a time, and never during a turn, a think or a game. On first
 start the old Chat log (`jarvis-chat.json`, renamed `.imported.json`) and the
 spoken-turn history are moved into the bank and noted the same way.
 
+### Files and repos
+
+Jarvis can see and work on files anywhere on the PC (`assistant-files.js`):
+
+- **files**: list a folder, show its tree, read a file (with line numbers, a
+  part at a time), find files by name and/or contents, info, write, append,
+  edit (exact find-and-replace), make folders, move, copy, delete, open in
+  Explorer or its app. Deleting always goes to the **Recycle Bin**.
+- **repo**: an overview of a project (branch, uncommitted changes, latest
+  commits, what it's made of, the README), git (status, log, diff, add,
+  commit, branches, pull, push, clone and the rest of a safe set; never
+  force-push, `reset --hard`, `clean` or history rewrites), a new local repo
+  with a README and `.gitignore`, and a new GitHub repo from it through the
+  `gh` CLI (private unless asked).
+
+Settings → Jarvis → **Files and repos** decides what waits for you:
+
+| Setting | What happens |
+|---|---|
+| Off | He can't see or touch files; the tools aren't offered to the model at all |
+| Ask before changes (default) | Reading and searching just happen; every change (write, edit, move, copy, delete, opening a program, a git commit or push, a new repo) shows a card with what it will do (the file's start, or the edit as a diff) and waits for **Allow**, **Allow for this chat** or **No** |
+| Ask for everything | Reading waits for Allow too |
+| Bypass: never ask | Nothing waits |
+
+The card is on the island and in the Chat app; either one answers it. Two
+minutes without an answer, or the conversation going away, is a no. Whatever
+the setting, he never changes anything under Windows, Program Files or
+ProgramData\Microsoft, never touches a whole drive or your whole user folder,
+and never opens the panel's own keys (Claude, Govee, Discord). A read of a big
+file is cut to what the model can take (about 9,000 characters for the local
+model, 30,000 for Claude) and continues from a line on request.
+
+### Usage and meters
+
+Every model request, tool call and answer is counted (`assistant-usage.js`,
+`jarvis-usage/` in the data folder): one line per event in a monthly
+`YYYY-MM.jsonl`, and running totals for all time, each month and each day
+(with its 24 hours), broken down by model, tool and what it was for
+(answering you, the memory note-taker, thinking hard). Tokens in is the whole
+prompt read, with how much of it the server reused from its cache; out is
+what was written. The local model's numbers come from llama-server's own
+timings, Claude's from its usage report.
+
+**Stats** in the Chat app shows today, this month or all time: tokens in and
+out, cache hits, answers (and how many hit an error), model requests per
+answer, tool calls (failed, average and slowest time), writing and reading
+speed in tokens a second, the largest prompt, model time, the slowest answer;
+a chart by hour (today) or by day (the last 31); tables per model, per tool
+and per kind; the chats that used the most; month by month; and the latest
+requests, tool calls and answers one by one.
+
+While he works, the card shows a **context meter** (how full the model's
+context window is: the prompt's size against the model's `ctx-size` from
+`jarvis-models.ini`, or 200k for Claude; an estimate until the server
+reports the exact count), what he is doing right now (reading the prompt,
+writing at so many tokens a second, using tools), and this answer's running
+totals. The island shows the same gauge in small.
+
+### Models: everyday, gaming, start-up
+
+Settings → Jarvis: the **everyday model** is the one Jarvis uses and, with
+**Load it at start** on, loads as soon as the local server is up (when the
+panel starts, whenever the router comes up later, and again after a game) so
+the first question doesn't wait. The **gaming model** (the 4B by default)
+takes over while a game is in front.
+
 ### Thinking hard: the big model
+
+**Off by default** (Settings → Jarvis → Think hard). Off, he is never told
+about it and answers everything himself; switching it off mid-think stops the
+think. On:
 
 "Jarvis, think hard about…" (or any question the 9B judges needs real
 thought) hands it to **`jarvis-flash`**: Qwen3.8-Flash-Next, a 125B mixture of
@@ -1179,6 +1253,8 @@ wscript "autostart-hidden.vbs" 0
 | `assistant-models.js` | Local models: Hugging Face search, confirmed downloads, adding to the preset |
 | `assistant-chats.js` | Jarvis's chat bank: every exchange filed into chats, search, the 7-day rule for basic commands |
 | `assistant-memory.js` | The memory guide: notes, facts, topics and command counts, kept by the note-taker |
+| `assistant-files.js` | Jarvis's files and repo tools, and what they never touch |
+| `assistant-usage.js` | Usage: every request, tool call and answer counted; totals per day, month and all time |
 | `govee.js` | Govee lights over the LAN API (and the cloud API, with a key) |
 | `tts-kokoro.py` | Jarvis's voice: Kokoro-82M, resident, one WAV per sentence |
 | `jarvis.js` / `jarvis.css` | Status bar, the island, alarms + timers, Jarvis's card and settings |

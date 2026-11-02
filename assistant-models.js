@@ -56,9 +56,11 @@ function readIni(settings) {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     const sec = line.match(/^\[([^\]]+)\]$/);
-    if (sec) { cur = { id: sec[1].trim(), file: null, mmproj: null }; out.push(cur); continue; }
+    if (sec) { cur = { id: sec[1].trim(), file: null, mmproj: null, ctx: 0 }; out.push(cur); continue; }
     const kv = line.match(/^model\s*=\s*(.+)$/);
     if (kv && cur) cur.file = kv[1].trim();
+    const cx = line.match(/^ctx-size\s*=\s*(\d+)/);
+    if (cx && cur) cur.ctx = Number(cx[1]);
     const mp = line.match(/^mmproj\s*=\s*(.+)$/);
     if (mp && cur) cur.mmproj = mp[1].trim();
   }

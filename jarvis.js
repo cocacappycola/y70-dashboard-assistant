@@ -24,6 +24,57 @@
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data || {}),
   }).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
 
+  // His replies are often written in markdown (bold, lists, headings, code,
+  // tables): drawn as such in the card, never as raw ** and #.
+  const escH = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const mdInline = (s) => escH(s)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/__([^_]+)__/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\s][^*]*)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>")
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, "$1");
+  function md(text) {
+    const out = [];
+    let list = null, code = null, table = null;
+    const endList = () => { if (list) { out.push("</" + list + ">"); list = null; } };
+    const endTable = () => { if (table) { out.push(table.join("") + "</tbody></table></div>"); table = null; } };
+    for (const raw of String(text || "").split(/\r?\n/)) {
+      if (code) {
+        if (/^\s*```/.test(raw)) { out.push("<pre><code>" + escH(code.join("\n")) + "</code></pre>"); code = null; }
+        else code.push(raw);
+        continue;
+      }
+      const t = raw.trim();
+      if (/^```/.test(t)) { endList(); endTable(); code = []; continue; }
+      if (/^\|.*\|$/.test(t)) {
+        endList();
+        const cells = t.slice(1, -1).split("|").map((c) => c.trim());
+        if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue;
+        if (!table) table = ['<div class="md-tbl"><table><thead><tr>' + cells.map((c) => "<th>" + mdInline(c) + "</th>").join("") + "</tr></thead><tbody>"];
+        else table.push("<tr>" + cells.map((c) => "<td>" + mdInline(c) + "</td>").join("") + "</tr>");
+        continue;
+      }
+      endTable();
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { endList(); continue; }
+      const h = t.match(/^#{1,6}\s+(.*)$/);
+      if (h) { endList(); out.push('<p class="md-h">' + mdInline(h[1]) + "</p>"); continue; }
+      const ul = t.match(/^[-*•]\s+(.*)$/), ol = t.match(/^\d+[.)]\s+(.*)$/);
+      if (ul || ol) {
+        const kind = ul ? "ul" : "ol";
+        if (list !== kind) { endList(); list = kind; out.push("<" + kind + ">"); }
+        out.push("<li>" + mdInline((ul || ol)[1]) + "</li>");
+        continue;
+      }
+      endList();
+      if (t) out.push("<p>" + mdInline(t) + "</p>");
+    }
+    // Still streaming: an open code block shows as it is so far.
+    if (code) out.push("<pre><code>" + escH(code.join("\n")) + "</code></pre>");
+    endList(); endTable();
+    return out.join("");
+  }
+  // 9400 -> "9.4k"
+  const kfmt = (n) => { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M" : n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n); };
+
   // ---------------------------------------------------------------- time ----
   const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   function fmtLeft(ms) {
@@ -320,6 +371,12 @@
     if (J.mode !== "idle") {
       const label = J.mode === "listening" ? "Listening…" : J.mode === "thinking" ? (J.status || "Thinking…") : "";
       segs.push({ jarvis: true, label });
+      // How full his context is, and how fast he is writing.
+      const m = J.meter;
+      if (m && J.mode !== "listening" && (m.window || m.tps)) {
+        const pct = m.window ? Math.min(100, Math.round((m.ctx / m.window) * 100)) : null;
+        segs.push({ cls: "meter", meter: true, pct, label: (pct != null ? pct + "%" : kfmt(m.ctx)) + (m.stage === "writing" && m.tps ? " · " + Math.round(m.tps) + " t/s" : "") });
+      }
     }
     // A model downloading: its progress, read off the disk by the server.
     const dl = (J.downloads || []).filter((d) => !d.done && !d.registered && !d.error);
@@ -354,14 +411,19 @@
             for (let i = 0; i < 4; i++) bars.appendChild(el("i"));
             seg.appendChild(bars);
           }
-        } else seg.appendChild(el("span", "seg-ico", s.ico));
+        } else if (s.meter) seg.appendChild(el("span", "mini")).appendChild(el("i"));
+        else seg.appendChild(el("span", "seg-ico", s.ico));
         seg.appendChild(el("span", "seg-label", s.label));
         isl.appendChild(seg);
       }
-    } else {
-      // Only the words change from second to second.
-      [...isl.children].forEach((n, i) => { const l = n.querySelector(".seg-label"); if (l && segs[i]) l.textContent = segs[i].label; });
     }
+    // Only the words (and the gauge) change from second to second.
+    [...isl.children].forEach((n, i) => {
+      const s = segs[i];
+      if (!s) return;
+      const l = n.querySelector(".seg-label"); if (l) l.textContent = s.label;
+      const g = n.querySelector(".mini i"); if (g) { g.style.width = (s.pct || 0) + "%"; g.className = s.pct >= 90 ? "hot" : s.pct >= 70 ? "warm" : ""; }
+    });
   }
 
   // ---------------------------------------------------------------- card ----
@@ -389,8 +451,8 @@
   }
   function scheduleClose(ms) {
     clearTimeout(closeTimer);
-    if (ring || typing || alarmDraft) return;
-    closeTimer = setTimeout(() => { if (!ring && J.mode === "idle" && !typing) closeCard(); }, ms);
+    if (ring || typing || alarmDraft || J.perms.length) return;
+    closeTimer = setTimeout(() => { if (!ring && J.mode === "idle" && !typing && !J.perms.length) closeCard(); }, ms);
   }
 
   // The card's sections are rebuilt only when what they show changes; the
@@ -559,6 +621,8 @@
     mode: "idle",            // idle | listening | thinking | speaking
     heard: "", reply: "", status: "", note: "",
     cards: [], conv: null, convAt: 0, ctl: null, provider: null,
+    meter: null,             // the latest "meter" event of this turn
+    perms: [],               // file changes waiting for a yes
   };
   let JS = null;              // settings, from the server
   let JST = null;             // status, from the server
@@ -575,11 +639,12 @@
   }
 
   // ----------------------------------------------------------- the card -----
-  let replyEl = null, heardEl = null, statusEl = null, cardsEl = null, noteEl = null, stateEl = null;
+  let replyEl = null, heardEl = null, statusEl = null, cardsEl = null, noteEl = null, stateEl = null, meterEl = null, permEl = null;
+  let replyShown = null;
   function renderJarvis() {
     if (!cardOpen) return;
     const box = $("#ic-jarvis");
-    const show = J.mode !== "idle" || J.reply || J.heard || J.cards.length || typing || J.status || J.note;
+    const show = J.mode !== "idle" || J.reply || J.heard || J.cards.length || typing || J.status || J.note || J.perms.length;
     box.hidden = !show;
     if (!show) return;
     if (!box.firstChild) {
@@ -599,8 +664,10 @@
       top.append(kb, mic);
       box.appendChild(top);
       heardEl = box.appendChild(el("div", "jv-heard"));
+      permEl = box.appendChild(el("div", "jv-perms"));
       replyEl = box.appendChild(el("div", "jv-reply"));
       statusEl = box.appendChild(el("div", "jv-status"));
+      meterEl = box.appendChild(el("div", "jv-meter"));
       noteEl = box.appendChild(el("div", "jv-note"));
       box.appendChild(el("div", "jv-type")).id = "jv-type";
       cardsEl = box.appendChild(el("div", "jv-cards"));
@@ -610,15 +677,92 @@
       listening: "Listening…", thinking: "Thinking…", speaking: "Speaking",
     }[J.mode];
     heardEl.textContent = J.heard ? "“" + J.heard + "”" : "";
-    replyEl.textContent = J.reply.trim();
+    // Rebuilt only when the words change (it streams in a token at a time).
+    const reply = J.reply.trim();
+    if (reply !== replyShown) { replyShown = reply; replyEl.innerHTML = md(reply); }
     statusEl.innerHTML = "";
     if (J.status) {
       if (J.mode === "thinking") statusEl.appendChild(el("span", "spin"));
       statusEl.appendChild(el("span", null, J.status));
     }
     noteEl.textContent = J.note;
+    renderMeter();
+    renderPerms();
     renderTyping();
     renderCards();
+  }
+
+  // ---- meters: the context window and this turn's tokens, live ----
+  function renderMeter() {
+    if (!meterEl) return;
+    const m = J.meter;
+    if (!m) { meterEl.innerHTML = ""; return; }
+    const live = J.mode === "thinking" || J.mode === "speaking";
+    const pct = m.window ? Math.min(100, Math.round((m.ctx / m.window) * 100)) : null;
+    let bar = meterEl.querySelector(".jm-bar i");
+    if (!bar) {
+      meterEl.innerHTML = "";
+      const top = meterEl.appendChild(el("div", "jm-row"));
+      top.appendChild(el("span", "jm-k", "Context"));
+      top.appendChild(el("span", "jm-ctx"));
+      meterEl.appendChild(el("div", "jm-bar")).appendChild(el("i"));
+      meterEl.appendChild(el("div", "jm-row jm-live"));
+      meterEl.appendChild(el("div", "jm-row jm-turn"));
+      bar = meterEl.querySelector(".jm-bar i");
+    }
+    meterEl.querySelector(".jm-ctx").textContent = (m.est ? "~" : "") + kfmt(m.ctx) + (m.window ? " / " + kfmt(m.window) + " · " + pct + "%" : " tokens");
+    bar.style.width = (pct == null ? 0 : Math.max(1, pct)) + "%";
+    bar.className = pct >= 90 ? "hot" : pct >= 70 ? "warm" : "";
+    const now = !live ? "" :
+      m.stage === "reading" ? "Reading the prompt" + (m.est ? " (~" + kfmt(m.ctx) + ")" : " · " + kfmt(m.ctx) + " tokens") + "…" :
+      m.stage === "writing" ? "Writing · " + m.out + " tokens · " + m.tps + " tok/s" :
+      m.stage === "tool" ? "Using tools · " + m.toolCalls + " so far" :
+      m.stage === "step" ? "Step " + m.step + " done · " + m.out + " tokens" + (m.tps ? " at " + m.tps + " tok/s" : "") : "";
+    meterEl.querySelector(".jm-live").textContent = now;
+    meterEl.querySelector(".jm-live").hidden = !now;
+    meterEl.querySelector(".jm-turn").textContent = "This answer: " + m.step + (m.step === 1 ? " request · " : " requests · ") +
+      kfmt(m.turnIn) + " in" + (m.turnCached ? " (" + kfmt(m.turnCached) + " cached)" : "") + " · " + kfmt(m.turnOut) + " out" +
+      (m.toolCalls ? " · " + m.toolCalls + (m.toolCalls === 1 ? " tool" : " tools") + (m.toolFails ? " (" + m.toolFails + " failed)" : "") : "") +
+      " · " + (m.elapsed / 1000).toFixed(1) + " s" + (m.model ? " · " + m.model : "");
+    meterEl.classList.toggle("live", live);
+  }
+
+  // ---- "Can I…?": a file change waiting for a tap ----
+  function renderPerms() {
+    if (!permEl) return;
+    const sig = J.perms.map((p) => p.id).join(",");
+    if (permEl.dataset.sig === sig) return;
+    permEl.dataset.sig = sig;
+    permEl.innerHTML = "";
+    for (const p of J.perms) {
+      const box = permEl.appendChild(el("div", "jp" + (p.write ? " write" : "")));
+      box.appendChild(el("div", "jp-k", p.write ? "Jarvis wants to change something" : "Jarvis wants to look"));
+      box.appendChild(el("div", "jp-t", p.title));
+      if (p.path) box.appendChild(el("div", "jp-p", p.path));
+      if (p.detail) box.appendChild(el("pre", "jp-d", p.detail));
+      const row = box.appendChild(el("div", "jp-btns"));
+      for (const [answer, text, cls] of [["allow", "Allow", "btn--primary"], ["always", "Allow for this chat", "btn--ghost"], ["deny", "No", "btn--ghost"]]) {
+        const b = row.appendChild(el("button", "btn btn--sm " + cls, text));
+        b.addEventListener("pointerup", () => answerPerm(p.id, answer));
+      }
+    }
+  }
+  async function answerPerm(id, answer) {
+    J.perms = J.perms.filter((p) => p.id !== id);
+    renderJarvis();
+    await post("permission/" + id, { answer });
+  }
+  function addPerm(ev) {
+    if (J.perms.some((p) => p.id === ev.id)) return;
+    J.perms.push(ev);
+    openCard();
+    chime.done();
+    renderJarvis();
+  }
+  function dropPerm(id) {
+    const n = J.perms.length;
+    J.perms = J.perms.filter((p) => p.id !== id);
+    if (J.perms.length !== n) renderJarvis();
   }
 
   function renderTyping() {
@@ -951,7 +1095,7 @@
 
   function ask(text) {
     speech.reset();
-    J.heard = text; J.reply = ""; J.status = ""; J.cards = []; cardsSig = "";
+    J.heard = text; J.reply = ""; J.status = ""; J.cards = []; cardsSig = ""; J.meter = null;
     openCard();
     setMode("thinking");
     // A follow-up within a few minutes continues the conversation.
@@ -965,6 +1109,7 @@
     discord: "Talking to Discord", notes: "Opening your notes", phone: "Talking to your phone", info: "Checking",
     lights: "Changing the lights", recall: "Remembering", find_model: "Looking for models",
     history: "Looking through your chats",
+    files: "Working with your files", repo: "Working on the repo",
   };
 
   async function runTurn(payload) {
@@ -979,7 +1124,7 @@
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "", pending = false;
-      const flush = () => { pending = false; renderJarvis(); };
+      const flush = () => { pending = false; renderJarvis(); renderIsland(); };
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -1011,6 +1156,9 @@
             case "memory": if (jarvisViewOpen()) loadFacts(); break;
             // He opened one of your chats: the Chat app shows it once he's done.
             case "chat-open": J.openChat = true; break;
+            case "meter": J.meter = ev; break;
+            case "permission": addPerm(ev); break;
+            case "permission-done": dropPerm(ev.id); break;
             case "notes": showNotes(ev.flash); break;
             case "done": J.convAt = Date.now(); break;
             case "error":
@@ -1843,6 +1991,9 @@
       case "memory":
         if (jarvisViewOpen()) loadFacts();
         return;
+      // Asked, or answered, from the Chat app as well.
+      case "permission": addPerm(ev); return;
+      case "permission-done": dropPerm(ev.id); return;
       case "think":
         onThink(ev);
         return;
@@ -2036,12 +2187,16 @@
     // ---- Local model
     // Every model in jarvis-models.ini: the 27B, 9B and 4B, and whatever
     // Jarvis has downloaded since.
-    f.appendChild(label("Local model", "llama.cpp, jarvis-llm.bat"));
-    const lm = local.models && local.models.length ? local.models
-      : [{ id: "jarvis-27b" }, { id: "jarvis-9b" }, { id: "jarvis-4b" }];
+    f.appendChild(label("Everyday model", "the local model Jarvis starts with"));
+    const lm = (local.models && local.models.length ? local.models
+      : [{ id: "jarvis-27b" }, { id: "jarvis-9b" }, { id: "jarvis-4b" }]).filter((m) => m.id !== JS.thinkModel);
     const NICE = { "jarvis-27b": "Qwen3.8 27B · smartest", "jarvis-9b": "Qwen3.5 9B · smarter", "jarvis-4b": "Qwen3.5 4B · lighter" };
-    f.appendChild(chips(lm.map((m) => [m.id, (NICE[m.id] || m.id) + (m.loaded ? " · loaded" : "") + (local.up && m.served === false ? " · restart to load" : "")]),
-      JS.localModel, (v) => saveSetting({ localModel: v })));
+    const modelChips = (current, onPick) => chips(lm.map((m) => [m.id, (NICE[m.id] || m.id) + (m.loaded ? " · loaded" : "") + (local.up && m.served === false ? " · restart to load" : "")]), current, onPick);
+    f.appendChild(modelChips(JS.localModel, (v) => saveSetting({ localModel: v })));
+    f.appendChild(toggle("Load it at start", "as soon as the local server is up (and again after a game), so the first question doesn't wait for it", JS.bootModel, (v) => saveSetting({ bootModel: v })));
+    f.appendChild(label("Gaming model", "while a game is in front"));
+    f.appendChild(toggle("Switch while gaming", "a game in front swaps to this model and frees the everyday one's VRAM", JS.autoGameModel, (v) => saveSetting({ autoGameModel: v })));
+    if (JS.autoGameModel) f.appendChild(modelChips(JS.gameModel, (v) => saveSetting({ gameModel: v })));
     if (local.up && local.needsRestart) {
       const rr = el("div", "jf-row");
       rr.appendChild(status("New models were added since the local server started. Restart it to load them.", "warn"));
@@ -2050,8 +2205,7 @@
       rr.appendChild(rb);
       f.appendChild(rr);
     }
-    f.appendChild(toggle("Use the 4B while gaming", "a game in front swaps to the 4B and frees the 9B's VRAM", JS.autoGameModel, (v) => saveSetting({ autoGameModel: v })));
-    if (JS.autoGameModel && st.game) f.appendChild(status(st.game.on ? "Game in front now (" + (st.game.exe || "fullscreen") + ") — using the 4B." : "No game in front.", st.game.on ? "warn" : ""));
+    if (JS.autoGameModel && st.game) f.appendChild(status(st.game.on ? "Game in front now (" + (st.game.exe || "fullscreen") + ") — using " + JS.gameModel + "." : "No game in front.", st.game.on ? "warn" : ""));
     f.appendChild(status(local.up
       ? "Running" + (local.loaded ? " · " + local.loaded + " loaded" : " · no model loaded yet (loads on the first question)") + " · next answer uses " + local.model
       : "Not running.", local.up ? "good" : "warn"));
@@ -2071,6 +2225,21 @@
     }
     f.appendChild(lr);
     f.appendChild(textRow(JS.localBat, "Path to jarvis-llm.bat", "Save", (v) => saveSetting({ localBat: v })));
+
+    // ---- Thinking hard (the big model)
+    f.appendChild(label("Think hard", "the big model"));
+    f.appendChild(toggle("Let Jarvis think hard", "hard questions go to " + JS.thinkModel + " in the background; it takes the whole local server (and most of the RAM) for several minutes", JS.thinkHard, (v) => saveSetting({ thinkHard: v })));
+    f.appendChild(status(JS.thinkHard ? "On: he hands over hard questions, or when you say “think hard”." : "Off: he answers everything himself and never loads the big model."));
+
+    // ---- Files and repos
+    f.appendChild(label("Files and repos", "what Jarvis may do on this PC"));
+    f.appendChild(chips([["off", "Off"], ["ask", "Ask before changes"], ["askall", "Ask for everything"], ["bypass", "Bypass: never ask"]], JS.files, (v) => saveSetting({ files: v })));
+    f.appendChild(status({
+      off: "He can't see or touch your files.",
+      ask: "He reads and searches freely; every change (writing, editing, moving, deleting, git commits, pushes) waits for your Allow on the panel.",
+      askall: "Every look and every change waits for your Allow on the panel.",
+      bypass: "He reads and changes files and runs git without asking. Deletes still go to the Recycle Bin; Windows, Program Files and the panel's keys stay off-limits.",
+    }[JS.files] || "", JS.files === "bypass" ? "warn" : ""));
 
     // ---- Getting more models
     f.appendChild(label("Get a model", "Hugging Face, or say “Jarvis, download…”"));

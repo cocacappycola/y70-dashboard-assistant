@@ -71,9 +71,22 @@ function save(chat) {
   cache.set(chat.id, chat);
   try { writeAtomic(fileOf(chat.id), JSON.stringify(chat)); } catch (e) {}
   const e = entryOf(chat.id);
-  const meta = { id: chat.id, title: chat.title, kind: chat.kind, key: chat.key || null, created: chat.created, updated: chat.updated, count: chat.turns.length, summary: chat.summary || "", autoTitle: !!chat.autoTitle };
+  const meta = { id: chat.id, title: chat.title, kind: chat.kind, key: chat.key || null, created: chat.created, updated: chat.updated, count: chat.turns.length, summary: chat.summary || "", autoTitle: !!chat.autoTitle, usage: chatUsage(chat) };
   if (e) Object.assign(e, meta); else index.push(meta);
   saveIndex();
+}
+
+// What a chat has used, from its exchanges (each turn carries its own usage;
+// ones from before usage was counted have none).
+function chatUsage(chat) {
+  const u = { in: 0, cached: 0, out: 0, requests: 0, toolCalls: 0, toolFails: 0, ms: 0, counted: 0 };
+  for (const t of chat.turns) {
+    const x = t.usage;
+    if (!x) continue;
+    u.counted++;
+    for (const k of ["in", "cached", "out", "requests", "toolCalls", "toolFails", "ms"]) u[k] += x[k] | 0;
+  }
+  return u;
 }
 
 const newId = () => "k" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
