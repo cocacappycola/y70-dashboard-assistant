@@ -964,6 +964,7 @@
     weather: "Checking the weather", volume: "Adjusting the volume", remember: "Remembering",
     discord: "Talking to Discord", notes: "Opening your notes", phone: "Talking to your phone", info: "Checking",
     lights: "Changing the lights", recall: "Remembering", find_model: "Looking for models",
+    history: "Looking through your chats",
   };
 
   async function runTurn(payload) {
@@ -1008,6 +1009,8 @@
               break;
             case "client": clientCalls = ev.calls; break;
             case "memory": if (jarvisViewOpen()) loadFacts(); break;
+            // He opened one of your chats: the Chat app shows it once he's done.
+            case "chat-open": J.openChat = true; break;
             case "notes": showNotes(ev.flash); break;
             case "done": J.convAt = Date.now(); break;
             case "error":

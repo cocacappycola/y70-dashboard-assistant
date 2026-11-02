@@ -28,6 +28,8 @@ const path = require("path");
 const { spawn, execFile } = require("child_process");
 const web = require("./assistant-web");
 const models = require("./assistant-models");
+const chats = require("./assistant-chats");
+const memory = require("./assistant-memory");
 const govee = require("./govee");
 const discord = require("./discord");
 
@@ -769,10 +771,12 @@ function thinkCancel(why) {
 // Kept short on purpose: every distinct word costs the big model a read from
 // disk on this PC (its 29 GB per-layer table does not fit in RAM), measured at
 // ~12 tokens/s for a real 1,600-token prompt.
-function thinkContext() {
-  const recent = loadChat().filter((e) => Date.now() - e.at < 30 * 60 * 1000).slice(-2);
+function thinkContext(chatId) {
+  // The chat the question came from, else the latest exchanges anywhere.
+  const turns = chatId ? chats.recentTurns(chatId, 2500).slice(-2) : chats.latest(2);
+  const recent = turns.filter((e) => Date.now() - e.at < 30 * 60 * 1000 && e.reply && e.reply !== THINK_ACK);
   if (!recent.length) return "";
-  return "\n\nThe conversation just before this (for context):\n" + recent.map((e) => e.conv === "think"
+  return "\n\nThe conversation just before this (for context):\n" + recent.map((e) => e.think
     ? "Earlier deep-think question: " + String(e.heard || "").replace(/^Think hard:\s*/, "").slice(0, 400) + "\nYour answer then:\n" + String(e.reply || "").slice(0, 1500)
     : "User: " + String(e.heard || "").slice(0, 300) + "\nJarvis: " + String(e.reply || "").slice(0, 400)).join("\n\n");
 }
@@ -797,7 +801,7 @@ function thinkSystem() {
   ].join("\n");
 }
 
-async function thinkStart(a) {
+async function thinkStart(a, conv) {
   // Every word costs the big model a read from disk here (see thinkContext),
   // and the 9B tends to write a page where a paragraph does.
   const question = String(a.question || "").trim().slice(0, 2500);
@@ -810,7 +814,7 @@ async function thinkStart(a) {
   // Claimed before anything is awaited, so two calls at once cannot both start.
   // Pending until the turn that asked is over: the router holds one model, so
   // starting now would pull the big model in under the turn's own last step.
-  const job = { id: ++think.seq, question, requested: a.effort, effort: "medium", started: Date.now(), phase: "waking", tokens: 0, ctl: new AbortController(), cancelled: null, pending: true };
+  const job = { id: ++think.seq, question, requested: a.effort, effort: "medium", started: Date.now(), phase: "waking", tokens: 0, ctl: new AbortController(), cancelled: null, pending: true, conv: conv || null };
   think.job = job;
   if (!(await localProbe(true))) {
     if (think.job === job) think.job = null;
@@ -863,7 +867,7 @@ async function thinkRun(job) {
     // stop, close the thinking with a nudge, and continue into the answer,
     // reusing the prompt it has already read.
     const budget = THINK_BUDGET[job.effort];
-    const messages = [{ role: "system", content: thinkSystem() }, { role: "user", content: job.question + thinkContext() }];
+    const messages = [{ role: "system", content: thinkSystem() }, { role: "user", content: job.question + thinkContext(job.conv && job.conv.chatId) }];
     const tr = await fetch(base + "/apply-template", {
       method: "POST", headers: { "Content-Type": "application/json" }, signal: job.ctl.signal,
       body: JSON.stringify({ model: settings.thinkModel, messages, chat_template_kwargs: { reasoning_effort: job.effort, enable_thinking: true } }),
@@ -925,11 +929,17 @@ async function thinkRun(job) {
     ? lines.slice(at).join(" ").replace(/^\s*[*_]*SPOKEN[*_]*\s*:\s*/, "").replace(/[*_`#]/g, "").trim()
     : firstPara();
   const answer = (at >= 0 ? lines.slice(0, at).join("\n") : content).trim();
-  addChat({
-    id: "t" + Date.now().toString(36), at: Date.now(), conv: "think",
-    heard: job.asked || "Think hard: " + job.question, reply: answer, tools: ["think_hard"], cards: [], model: settings.thinkModel,
+  // Into the chat the question was asked in (its "On it" is already there).
+  const chatId = (job.conv && job.conv.chatId && chats.get(job.conv.chatId)) ? job.conv.chatId : chats.create({ kind: "topic", title: chats.roughTitle(job.asked || job.question) }).id;
+  const turn = {
+    at: Date.now(), heard: job.asked || "Think hard: " + job.question, reply: answer, tools: ["think_hard"], cards: [], model: settings.thinkModel, ok: true,
     think: { seconds, tokens: job.tokens, reasoningTokens: reasoning, effort: job.effort, warm: job.warm || null },
-  });
+  };
+  const chat = chats.addTurn(chatId, turn);
+  if (chat) {
+    broadcast({ type: "chat", entry: { id: "t" + turn.at.toString(36), ...turn, chatId: chat.id, chatTitle: chat.title, chatKind: chat.kind } });
+    memory.queueExchange({ chatId: chat.id, chatTitle: chat.title, heard: turn.heard, reply: answer.slice(0, 2500), at: turn.at });
+  }
   thinkBroadcast("done", { question: job.asked || job.question, spoken, seconds });
 }
 
@@ -1292,6 +1302,18 @@ const TOOLS = [
     },
   },
   {
+    name: "history", where: "server", core: true,
+    description: "Your data bank: every past conversation, filed in chats (topic chats kept for good; repeated basic commands kept 7 days). search (query): find what was said before (a past question, a decision, a name, a number, a recommendation); returns the matching moments with their chat and date. open (chat: its id or words of its title): continue that chat; its latest exchanges come back to you and it is shown in the Chat app. list: the recent chats. new: start a fresh chat for what follows, when the subject changes completely. rename (chat, title). Your memory guide has the summary; this has the details.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["search", "open", "list", "new", "rename"] },
+        query: { type: "string" }, chat: { type: "string" }, title: { type: "string" },
+      },
+      required: ["action"],
+    },
+  },
+  {
     name: "think_hard", where: "server", core: true,
     description: "Hand a hard question to Jarvis's big model, which is far smarter than you but slower: hard reasoning, maths, code, planning, comparisons and decisions, explaining something properly, or anything the user asks you to \"think hard\", \"really think\" or \"take your time\" about. It works in the background (several minutes, most of it loading); the full answer opens in the Chat app and is read out when it is ready. question: the whole question with everything it needs, as short as it can be while complete, since it cannot see this conversation (include what \"it\" or \"that\" refers to). effort: leave it out (medium) unless the user asks for a quick think (low) or for as much thought as possible (high).",
     input_schema: {
@@ -1449,7 +1471,10 @@ function captureScreen(target) {
     else { const t0 = Date.now(); const iv = setInterval(() => { if (voice.ready) { clearInterval(iv); send(); } else if (Date.now() - t0 > 8000) clearInterval(iv); }, 100); }
   });
 }
-// Kept for the Chat app (the last 40), served at /api/jarvis/capture/<file>.
+// Kept with their chats, served at /api/jarvis/capture/<file>. Chats are for
+// good, so the screenshots are too, up to 1 GB; past that the oldest go (their
+// written answers stay in the chat). Deleting a chat deletes its screenshots.
+const CAPTURE_BUDGET = 1024 * 1024 * 1024;
 function capturesDir() { return path.join(H.DATA, "captures"); }
 function saveCapture(images) {
   const dir = capturesDir();
@@ -1457,10 +1482,25 @@ function saveCapture(images) {
   const id = "c" + Date.now().toString(36);
   const files = images.map((im, i) => { const f = id + "-" + i + ".jpg"; fs.writeFileSync(path.join(dir, f), Buffer.from(im.data, "base64")); return f; });
   try {
-    const all = fs.readdirSync(dir).filter((f) => /\.jpg$/.test(f)).sort();
-    for (const f of all.slice(0, Math.max(0, all.length - 40))) fs.unlinkSync(path.join(dir, f));
+    const all = fs.readdirSync(dir).filter((f) => /\.jpg$/.test(f)).sort().map((f) => ({ f, size: fs.statSync(path.join(dir, f)).size }));
+    let total = all.reduce((s, x) => s + x.size, 0);
+    for (const x of all) {
+      if (total <= CAPTURE_BUDGET) break;
+      fs.unlinkSync(path.join(dir, x.f));
+      total -= x.size;
+    }
   } catch (e) {}
   return files;
+}
+function dropCaptures(chat) {
+  for (const t of (chat && chat.turns) || []) {
+    for (const c of t.cards || []) {
+      for (const src of c.images || []) {
+        const f = String(src).split("/").pop();
+        if (/^c[a-z0-9]+-\d+\.jpg$/.test(f)) { try { fs.unlinkSync(path.join(capturesDir(), f)); } catch (e) {} }
+      }
+    }
+  }
 }
 function visionModel() {
   const ini = models.readIni(settings);
@@ -1857,7 +1897,7 @@ function discordMember(user) {
 
 // Runs a server-side tool. Returns [resultForModel, isError]. `emit` puts
 // cards on the panel while it works.
-async function runServerTool(name, input, emit) {
+async function runServerTool(name, input, emit, conv) {
   const a = input || {};
   switch (name) {
     case "web_search": {
@@ -2026,7 +2066,8 @@ async function runServerTool(name, input, emit) {
       if (a.action === "read") return [numbered(text) || "(the notes are empty)"];
       return [r.msg + "\nThe notes now:\n" + (numbered(text) || "(empty)")];
     }
-    case "think_hard": return thinkStart(a);
+    case "think_hard": return thinkStart(a, conv);
+    case "history": return historyTool(a, emit, conv);
     case "info": {
       const r = await info(String(a.about || "everything"), a);
       return [JSON.stringify(r), !!(r && r.error)];
@@ -2083,6 +2124,7 @@ function who() { return settings.name || "the user"; }
 // from the tools this model actually has — then shows it done.
 const TOOL_GUIDE = {
   look: "anything about what is on the user's screen: \"what am I looking at\", \"answer these questions\", \"what does this error say\", \"help me with this\". It answers in full in the Chat app; you say the gist",
+  history: "anything from a past conversation the memory guide does not spell out (what was said, decided, recommended, when), or to go back to an older chat or start a fresh one",
   think_hard: "a question that needs real thought (hard reasoning, maths, code, planning, a decision, a proper explanation), or when asked to think hard or take your time: the big model works on it and the answer comes later",
   info: "anything about the PC (CPU, GPU, temperatures, power draw, fan speeds, drives' temperature, space and health, memory, network, what is running, uptime; about sensors for any single reading), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
   panel: "this app itself: check for or install updates, switch forks, a theme, your own settings, reload; the PC's screensaver (\"screensaver\", \"go to sleep\" for the screens); Wallpaper Engine (next wallpaper, pause it)",
@@ -2110,6 +2152,7 @@ const TOOL_GUIDE = {
 
 const TOOL_EXAMPLES = [
   ["turn it down a bit", "volume {action: down}", "then say the new level it returned"],
+  ["what did we decide about the bike battery last week?", "history {action: search, query: bike battery decision}", "then answer from what it found, with when"],
   ["is something hogging my GPU?", "info {about: pc}", "then answer from the GPU numbers and the busiest programs"],
   ["think hard about whether I should get 96 GB of RAM or a second GPU for local AI", "think_hard {question: \"Should Cappy upgrade to 96 GB of RAM or add a second GPU (RTX 3070 Ti) for running local AI models? ...everything relevant you know...\"}", "then just \"On it, I'll let you know.\""],
   ["how fast are my fans spinning?", "info {about: sensors, find: fan}", "then the speeds it returned, and say so if some read 0 (stopped, or not readable)"],
@@ -2171,11 +2214,15 @@ function systemPrompt(small) {
     "- Requests come through speech recognition and may be misheard (\"place on low fi beads\" means \"play some lo-fi beats\"). Interpret them charitably.",
     "- " + who() + " may be in the middle of a game. Be brief.",
     "- Each request starts with a bracketed line of background (the time, what is playing, timers). Use it when it helps; never remark on it otherwise.",
-    "- Your memory is shared with " + who() + "'s other assistant. When they tell you something worth keeping, remember it; to look something up in it, recall.",
+    "- Memory, always: your memory guide (at the end of these instructions) is open in front of you, written for you from every conversation. Check it before you answer anything about " + who() + ", their life, plans, projects, people, or anything you have talked about, and answer from it. For details it does not have (exact words, numbers, what was decided when), search your history; never guess at the past.",
+    "- A conversation that continues an older chat starts with that chat's latest exchanges, named up front. If " + who() + " clearly means a different past conversation, open it with history.",
+    "- When " + who() + " tells you something worth keeping for good, remember it (that memory is shared with their other assistant); recall looks things up there.",
   ];
   if (settings.about) parts.push("", "About " + who() + ":", settings.about);
   if (facts.length) parts.push("", "Things you have been asked to remember:", facts.map((f) => "- " + f.text).join("\n"));
   if (graph) parts.push("", "What the shared memory knows:", small ? graph.slice(0, 2500) + (graph.length > 2500 ? "\n(more: use recall)" : "") : graph);
+  // Last, so a change in it leaves the rest of the cached prompt alone.
+  parts.push("", "Your memory guide (kept up to date for you; check it first):", memory.promptText(small));
   return parts.join("\n");
 }
 
@@ -2401,7 +2448,7 @@ const MAX_SEARCHES = 2;
 // about something only a tool can know. If the step then ends without a tool
 // call, its text is dropped and the step runs again, once, with a reminder.
 const CLAIM = /^\W*(?:(?:ok(?:ay)?|sure|right|alright|got it|of course|certainly|no problem)\W+)?(?:i'?ll|i will|i'?m (?:going to|now|on it)|let me|on it|(?:checking|setting|turning|playing|opening|installing|restarting|reloading|switching|muting|unmuting|pausing|resuming|skipping|starting|looking|searching|dimming|changing|joining|leaving|answering|declining|updating|downloading)|i'?ve|i have|done|all set|(?:set|turned|muted|unmuted|paused|resumed|skipped|opened|installed|switched|started|joined|answered|declined|dimmed|changed|updated|downloaded|added|removed|saved|remembered))\b/i;
-const LIVE = /\b(updates?|version|cpu|gpu|vram|ram|temps?|temperatures?|hot|fps|fans?|rpm|watts?|power draw|voltages?|drives?|ssds?|nvme|disks?|storage|battery|notifications?|texts?|messages?|calls?|calling|discord|channel|talking|volume|louder|quieter|mute|unmute|deafen|headphones?|headset|speakers?|mic|microphone|lights?|timers?|alarms?|weather|rain|forecast|play|pause|skip|song|playing|news|score|price|spent|usage|widgets?|theme|layout|scene|open|download|remember|weather)\b/i;
+const LIVE = /\b(updates?|version|cpu|gpu|vram|ram|temps?|temperatures?|hot|fps|fans?|rpm|watts?|power draw|voltages?|drives?|ssds?|nvme|disks?|storage|battery|notifications?|texts?|messages?|calls?|calling|discord|channel|talking|volume|louder|quieter|mute|unmute|deafen|headphones?|headset|speakers?|mic|microphone|lights?|timers?|alarms?|weather|rain|forecast|play|pause|skip|song|playing|news|score|price|spent|usage|widgets?|theme|layout|scene|open|download|remember|weather|last time|we talked|you (?:said|told me|suggested)|did i (?:ask|say|tell))\b/i;
 // "What is a GPU?" is a question about the world, not about this PC.
 const KNOWLEDGE = /^\W*(?:(?:hey |ok |okay )?jarvis\W+)?(?:what(?:'s| is| are) (?:a|an|the difference)\b|what does .+ mean|define\b|explain\b|how (?:does|do) (?:a|an)\b|tell me (?:a joke|about (?:a|an)\b))/i;
 const NUDGE = "(Reminder from Jarvis's own system, not from " + "the user: you answered without calling a tool. If this request needs one, and anything about the PC, the phone, Discord, sound, this app, music, the lights, timers, alarms, the weather or anything current does, call the right tool now and answer from its result. Never say you did, are doing or checked something you did not. If it truly needs no tool, give your answer again.)";
@@ -2514,9 +2561,10 @@ async function runLoop(conv, emit, signal) {
           // Cards go to the panel now and into the chat log with the exchange.
           if (ev.type === "card" && conv.log.cards) conv.log.cards.push(ev.card);
           emit(ev);
-        });
+        }, conv);
       } catch (e) { out = "Tool failed: " + e.message; isErr = true; }
       emit({ type: "tool", id: u.id, name: u.name, status: "done", ok: !isErr });
+      if (isErr) conv.log.failed = true;
       return { type: "tool_result", tool_use_id: u.id, content: String(out == null ? "" : out), ...(isErr ? { is_error: true } : {}) };
     }));
 
@@ -2553,30 +2601,139 @@ function finish(conv, emit) {
     // What he first said instead of using a tool, when the reminder caught it.
     ...(conv.nudged ? { caught: conv.nudged.said } : {}),
   });
-  // The Chat app's log: the exchange, the cards that came with it (what he
-  // looked at, what he found), as it happened.
-  addChat({
-    id: "m" + Date.now().toString(36), at: Date.now(), conv: conv.id,
-    heard: conv.log.heard, reply: conv.log.reply.trim(), tools: [...new Set(conv.log.tools)],
-    cards: (conv.log.cards || []).slice(0, 6), model: conv.model || null,
+  fileTurn(conv, {
+    at: Date.now(), heard: conv.log.heard, reply: conv.log.reply.trim(), tools: [...new Set(conv.log.tools)],
+    cards: (conv.log.cards || []).slice(0, 6), model: conv.model || null, ok: !conv.log.failed,
   });
-  emit({ type: "done", conv: conv.id });
+  emit({ type: "done", conv: conv.id, chat: conv.chatId || null });
 }
 
-// ---- the chat log -------------------------------------------------------------------
-function chatFile() { return H.stateFile("jarvis-chat.json"); }
-let chat = null;
-function loadChat() {
-  if (chat) return chat;
-  try { chat = JSON.parse(fs.readFileSync(chatFile(), "utf8")); } catch (e) { chat = []; }
-  if (!Array.isArray(chat)) chat = [];
+// ---- chats: filing each exchange ------------------------------------------------------
+// A basic command goes to its command's chat (kept 7 days) and only moves its
+// count in the memory guide; anything else goes to this conversation's topic
+// chat (made now if it has none) and is queued for the note-taker.
+let lastChat = { id: null, at: 0 };
+function lastChatId() {
+  if (lastChat.id && chats.get(lastChat.id)) return lastChat.id;
+  const l = chats.list({ limit: 1 });
+  return l.length ? l[0].id : null;
+}
+function fileTurn(conv, turn) {
+  const key = chats.classify(turn.heard, turn.tools);
+  let chat;
+  if (key) {
+    chat = chats.addTurn(chats.basicChat(key).id, turn);
+    memory.recordCommand(key, turn.ok, turn.heard);
+  } else {
+    if (!conv.chatId || !chats.get(conv.chatId)) conv.chatId = chats.create({ kind: "topic", title: chats.roughTitle(turn.heard) }).id;
+    chat = chats.addTurn(conv.chatId, turn);
+    memory.queueExchange({ chatId: chat.id, chatTitle: chat.title, autoTitle: chat.autoTitle, heard: turn.heard, reply: turn.reply, at: turn.at });
+  }
+  if (!chat) return null;
+  lastChat = { id: chat.id, at: turn.at };
+  // The Chat app: the exchange, the cards that came with it, as it happened.
+  broadcast({ type: "chat", entry: { id: "m" + turn.at.toString(36), ...turn, chatId: chat.id, chatTitle: chat.title, chatKind: chat.kind } });
   return chat;
 }
-function addChat(entry) {
-  loadChat().push(entry);
-  chat = chat.slice(-200);
-  try { fs.writeFileSync(chatFile(), JSON.stringify(chat)); } catch (e) {}
-  broadcast({ type: "chat", entry });
+
+// ---- chats: which one a new conversation continues ---------------------------------
+// A chat picked in the Chat app wins; an everyday command needs no history;
+// otherwise the data bank is searched, and an older chat is only taken up when
+// the request clearly continues it (a strong match, or "back to / again / last
+// time" with a good one). A wrong guess is worse than a fresh start.
+const chatPick = { id: null, at: 0 };
+const CONTINUES = /\b(again|continue|carry on|back to|where were we|last time|earlier|before|remember when|we (talked|were talking|spoke|discussed)|you (said|told me|suggested)|follow(ing)? up|update on|more on|that (plan|idea|project|thing|list|build))\b/i;
+
+function routeChat(text) {
+  if (chatPick.id && Date.now() - chatPick.at < 10 * 60 * 1000) {
+    const id = chatPick.id;
+    chatPick.id = null;
+    if (id === "new") return null;           // "New chat": no history this time
+    const c = chats.get(id);
+    if (c) return { chat: c, why: "picked" };
+  }
+  if (chats.looksBasic(text)) return null;
+  const m = chats.bestChat(text);
+  if (!m || !m.chat) return null;
+  const cue = CONTINUES.test(text);
+  const recent = Date.now() - m.chat.updated < 45 * 24 * 60 * 60 * 1000;
+  if ((cue && m.coverage >= 0.4) || (recent && m.coverage >= 0.75 && m.score >= 6)) return { chat: m.chat, why: "matched", score: m.score, coverage: m.coverage };
+  return null;
+}
+
+// ---- the history tool ---------------------------------------------------------------
+const shortDay = (t) => new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+// "open / pull up / bring up / show me the chat about...": a small model tends to
+// search, then say it opened the chat without doing so. Asked like this, the
+// search opens the best match itself.
+const OPEN_ASK = /\b(open|pull up|bring up|show( me)?|go back to|switch to|take me to)\b[^.?!]*\b(chat|conversation|talk)\b/i;
+function historyTool(a, emit, conv) {
+  const act = String(a.action || "search");
+  if (act === "search") {
+    const q = String(a.query || a.chat || "").trim();
+    if (!q) return ["search needs a query.", true];
+    const hits = chats.search(q, { limit: 8 });
+    if (!hits.length) return ["Nothing in your history matches \"" + q + "\"."];
+    const list = hits.map((h) => "- [chat \"" + h.title + "\" (" + h.chatId + ", " + h.kind + "), " + shortDay(h.at) + "] " +
+      (h.heard ? "User: " + h.heard.slice(0, 220) + " | Jarvis: " + String(h.reply || "").slice(0, 320) : "Chat summary: " + (h.reply || "(none)"))).join("\n");
+    if (conv && conv.log && OPEN_ASK.test(conv.log.heard || "")) {
+      // The chat most about it: the most weight across its exchanges, not one lucky line.
+      const per = new Map();
+      for (const h of chats.search(q, { limit: 24, kind: "topic" })) per.set(h.chatId, (per.get(h.chatId) || 0) + h.score);
+      const best = [...per].sort((x, y) => y[1] - x[1])[0];
+      const [opened] = historyTool({ action: "open", chat: best ? best[0] : hits[0].chatId }, emit, conv);
+      return [opened + "\n\nOther matches:\n" + list];
+    }
+    return ["Matches, best first (none is on screen yet; to show one, call history with action \"open\" and its id):\n" + list];
+  }
+  if (act === "list") {
+    const l = chats.list({ limit: 15 });
+    if (!l.length) return ["No chats yet."];
+    return [l.map((c) => "- \"" + c.title + "\" (" + c.id + ", " + c.kind + ", " + c.count + " exchanges, last " + shortDay(c.updated) + ")" + (c.summary ? ": " + c.summary : "")).join("\n")];
+  }
+  if (act === "new") {
+    const c = chats.create({ kind: "topic", title: a.title ? String(a.title) : "New chat", autoTitle: !a.title });
+    if (conv) conv.chatId = c.id;
+    emit({ type: "chat-open", chat: c.id });
+    broadcast({ type: "chat-open", chat: c.id });
+    return ["Started a new chat" + (a.title ? " \"" + a.title + "\"" : "") + "; this conversation goes there now."];
+  }
+  const c = chats.find(a.chat || a.query);
+  if (!c) return ["No chat like \"" + (a.chat || a.query || "") + "\". list shows them.", true];
+  if (act === "rename") {
+    if (!a.title) return ["rename needs a title.", true];
+    chats.rename(c.id, a.title, false);
+    broadcast({ type: "chats" });
+    return ["Renamed it \"" + a.title + "\"."];
+  }
+  if (act === "open") {
+    if (conv && c.kind === "topic") conv.chatId = c.id;
+    emit({ type: "chat-open", chat: c.id });
+    broadcast({ type: "chat-open", chat: c.id });
+    const turns = chats.recentTurns(c.id, 5000).filter((t) => t.heard);
+    return ["Opened \"" + c.title + "\" (" + c.kind + ", " + c.turns.length + " exchanges, last " + ago(c.updated) + ")" + (c.summary ? ". Summary: " + c.summary : "") +
+      ". It is on screen in the Chat app" + (c.kind === "topic" ? ", and this conversation now continues it" : "") + ". Its latest exchanges:\n" +
+      turns.map((t) => "[" + shortDay(t.at) + "] User: " + t.heard.slice(0, 300) + "\nJarvis: " + String(t.reply || "").slice(0, 500)).join("\n")];
+  }
+  return ["unknown history action " + act, true];
+}
+
+const ago = (t) => {
+  const d = Math.round((Date.now() - t) / 86400000);
+  return d <= 0 ? "earlier today" : d === 1 ? "yesterday" : d < 14 ? d + " days ago" : new Date(t).toLocaleDateString("en-US", { month: "long", day: "numeric" });
+};
+
+// The chat's recent exchanges as the start of this conversation, plain user /
+// assistant messages so any provider takes them, the chat named up front.
+function resumeInto(conv, chat) {
+  conv.chatId = chat.id;
+  const turns = chats.recentTurns(chat.id, 6000).filter((t) => t.heard && t.reply);
+  const head = "(This continues your chat \"" + chat.title + "\"" + (chat.summary ? ": " + chat.summary : "") + ". Last talked " + ago(chat.updated) + ". Its latest exchanges follow.)";
+  if (!turns.length) return;
+  turns.forEach((t, i) => {
+    conv.messages.push({ role: "user", content: [{ type: "text", text: (i === 0 ? head + "\n" : "") + t.heard }] });
+    conv.messages.push({ role: "assistant", content: [{ type: "text", text: t.reply }] });
+  });
 }
 
 async function handleTurn(req, res) {
@@ -2588,6 +2745,7 @@ async function handleTurn(req, res) {
     const emit = (ev) => { if (!closed) { try { res.write(JSON.stringify(ev) + "\n"); } catch (e) {} } };
 
     let conv = body.conv && convs.get(body.conv);
+    turnsActive++;
     try {
       if (Array.isArray(body.results)) {
         // The panel finished the client-side tools of a step.
@@ -2603,11 +2761,16 @@ async function handleTurn(req, res) {
         for (const id of conv.pending.ids) {
           if (!byId.has(id)) byId.set(id, { type: "tool_result", tool_use_id: id, content: "no result", is_error: true });
         }
+        if (conv.log && [...byId.values()].some((r) => r.is_error)) conv.log.failed = true;
         conv.messages.push({ role: "user", content: conv.pending.order.map((id) => byId.get(id)).filter(Boolean) });
         conv.pending = null;
       } else {
         const text = String(body.text || "").trim();
         if (!text) throw new UserFacing("I didn't catch that.");
+        // A chat just picked in the Chat app starts afresh in that chat.
+        // (Typing into the chat this conversation is already in just carries on.)
+        if (chatPick.id && conv && conv.chatId === chatPick.id) chatPick.id = null;
+        if (chatPick.id && Date.now() - chatPick.at < 10 * 60 * 1000) conv = null;
         if (!conv || conv.pending) conv = newConv();
         // The big model is busy: anything asked now would queue behind it (or
         // swap it out), so answer at once instead, without a model.
@@ -2617,6 +2780,7 @@ async function handleTurn(req, res) {
           emit({ type: "text", delta: line });
           emit({ type: "done", conv: conv.id });
           addHistory({ at: Date.now(), conv: conv.id, heard: text, reply: line, provider: "local", model: "(busy thinking)", tools: [] });
+          turnsActive = Math.max(0, turnsActive - 1);
           try { res.end(); } catch (e) {}
           return;
         }
@@ -2625,8 +2789,17 @@ async function handleTurn(req, res) {
         conv.log = { heard: text, reply: "", tools: [], cards: [] };
         conv.searches = 0;
         conv.nudged = null; conv.nudge = null;
+        // A new conversation: does it continue a chat? Its history comes first.
+        if (!conv.chatId && !conv.messages.length) {
+          const r = routeChat(text);
+          if (r) {
+            resumeInto(conv, r.chat);
+            emit({ type: "chat-route", chat: r.chat.id, title: r.chat.title, why: r.why });
+            broadcast({ type: "chat-route", chat: r.chat.id, title: r.chat.title, why: r.why });
+          }
+        }
         // The Chat app shows the question at once, with a "thinking" bubble.
-        broadcast({ type: "chat-pending", heard: text, at: Date.now() });
+        broadcast({ type: "chat-pending", heard: text, at: Date.now(), chatId: conv.chatId || null });
         conv.messages.push({ role: "user", content: [{ type: "text", text: contextLine(body.context) + "\n" + text }] });
         emit({ type: "start", conv: conv.id, provider: conv.provider, model: conv.provider === "claude" ? settings.claudeModel : localModelNow() });
       }
@@ -2640,10 +2813,16 @@ async function handleTurn(req, res) {
         const msg = e instanceof UserFacing ? e.message : "Something went wrong: " + e.message;
         if (!(e instanceof UserFacing)) console.error("Jarvis turn failed:", e);
         emit({ type: "error", message: msg });
+        // A basic command that failed still counts, as a failure.
+        if (conv && conv.log) {
+          const key = chats.classify(conv.log.heard, conv.log.tools);
+          if (key) memory.recordCommand(key, false, conv.log.heard);
+        }
         // Drop the unanswered user message so the next attempt starts clean.
         if (conv && conv.messages.length && conv.messages[conv.messages.length - 1].role === "user") conv.messages.pop();
       }
     }
+    turnsActive = Math.max(0, turnsActive - 1);
     // A think this turn queued starts now that the turn is done with the model.
     if (think.job && think.job.pending && !(conv && conv.pending)) thinkGo();
     try { res.end(); } catch (e) {}
@@ -2759,14 +2938,46 @@ async function handle(req, res, urlPath) {
     return json(res, 200, { ok: true, models: localModels(), needsRestart: local.needsRestart, downloads: models.list(), dir: models.modelsDir(settings) });
   }
   // ---- The Chat app: the log, clearing it, the screenshots in it ----
-  if (sub === "chat" && req.method === "GET") return json(res, 200, { ok: true, entries: loadChat().slice(-120) });
-  if (sub === "chat/clear" && req.method === "POST") {
-    chat = [];
-    try { fs.writeFileSync(chatFile(), "[]"); } catch (e) {}
-    try { for (const f of fs.readdirSync(capturesDir())) fs.unlinkSync(path.join(capturesDir(), f)); } catch (e) {}
-    broadcast({ type: "chat-cleared" });
+  // ---- chats (the data bank) and the memory guide ----
+  if (sub === "chats" && req.method === "GET") return json(res, 200, { ok: true, chats: chats.list({ limit: 400 }), last: lastChatId() });
+  if (sub === "chats/search" && req.method === "GET") {
+    const q = new URL(req.url, "http://localhost").searchParams.get("q") || "";
+    return json(res, 200, { ok: true, hits: q.trim() ? chats.search(q, { limit: 30 }) : [] });
+  }
+  if (sub === "chats/new" && req.method === "POST") {
+    // The next question starts a fresh chat instead of continuing one.
+    Object.assign(chatPick, { id: "new", at: Date.now() });
     return json(res, 200, { ok: true });
   }
+  if (sub === "memory-guide" && req.method === "GET") return json(res, 200, { ok: true, markdown: memory.render(), stats: memory.stats() });
+  {
+    const m = /^chats\/(k[a-z0-9]+)(?:\/(pick|rename|delete))?$/.exec(sub);
+    if (m) {
+      const c = chats.get(m[1]);
+      if (!c) return json(res, 404, { ok: false, error: "no such chat" });
+      if (!m[2] && req.method === "GET") return json(res, 200, { ok: true, chat: c });
+      if (m[2] === "pick" && req.method === "POST") {
+        // Picked in the Chat app: the next question continues it.
+        Object.assign(chatPick, { id: c.id, at: Date.now() });
+        return json(res, 200, { ok: true });
+      }
+      if (m[2] === "rename" && req.method === "POST") {
+        return H.readJsonBody(req, res, (b) => {
+          chats.rename(c.id, String((b && b.title) || "").slice(0, 80), false);
+          broadcast({ type: "chats" });
+          return json(res, 200, { ok: true });
+        });
+      }
+      if (m[2] === "delete" && req.method === "POST") {
+        chats.remove(c.id);
+        dropCaptures(c);
+        broadcast({ type: "chats" });
+        return json(res, 200, { ok: true });
+      }
+    }
+  }
+  // The latest exchanges, whichever chat they are in (older panels ask this).
+  if (sub === "chat" && req.method === "GET") return json(res, 200, { ok: true, entries: chats.latest(60) });
   if (sub.startsWith("capture/") && req.method === "GET") {
     const f = sub.slice("capture/".length);
     if (!/^c[a-z0-9]+-\d+\.jpg$/.test(f)) return json(res, 404, { ok: false });
@@ -2901,11 +3112,74 @@ function init(host) {
     if (live.length) broadcast({ type: "downloads", downloads: models.list() });
   }, 2000).unref();
   migrateFacts().catch(() => {});
+  // The data bank (every exchange, filed into chats) and the memory guide.
+  const imported = chats.init(H.DATA);
+  memory.init(H.DATA, {
+    llm: quickJson,
+    // Notes wait for a quiet model: never during a turn, a think or a game.
+    canRun: () => turnsActive === 0 && !think.job && !game.on,
+    onChats: (list) => {
+      for (const c of list) {
+        const have = chats.get(c.id);
+        if (!have) continue;
+        if (have.autoTitle && c.title) chats.rename(c.id, c.title, false);
+        if (c.summary) chats.setSummary(c.id, c.summary);
+      }
+      if (list.length) broadcast({ type: "chats" });
+    },
+  });
+  memory.setWho(who());
+  // The old log, just moved into the bank: its commands are counted and its
+  // conversations noted, like any new ones.
+  if (imported) {
+    for (const b of imported.basic) memory.recordCommand(b.key, true, b.heard, b.at);
+    for (const t of imported.topic) memory.queueExchange(t);
+  }
 }
+
+// ---- a quick, quiet answer in JSON (the note-taker's) -----------------------
+// The everyday local model when the router is up (held to the schema by
+// llama-server's grammar, so a small model cannot break the format), else
+// Claude with a key. null when neither can answer now.
+async function quickJson(system, user, schema, maxTokens) {
+  if (await localProbe(false)) {
+    try {
+      const r = await fetch(settings.localUrl.replace(/\/+$/, "") + "/v1/chat/completions", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: localModelNow(), max_tokens: maxTokens || 800, temperature: 0.2,
+          messages: [{ role: "system", content: system }, { role: "user", content: user }],
+          response_format: { type: "json_schema", json_schema: { name: "out", schema } },
+          chat_template_kwargs: { enable_thinking: false },
+        }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const text = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+        if (text) return JSON.parse(text);
+      }
+    } catch (e) { /* fall through */ }
+  }
+  const c = claudeClient();
+  if (c) {
+    try {
+      const r = await c.messages.create({
+        model: "claude-haiku-4-5", max_tokens: maxTokens || 800, system: system + "\nAnswer with the JSON object only.",
+        messages: [{ role: "user", content: user + "\n\nJSON schema:\n" + JSON.stringify(schema) }],
+      });
+      const text = (r.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) return JSON.parse(m[0]);
+    } catch (e) { /* not now */ }
+  }
+  return null;
+}
+let turnsActive = 0;
 
 module.exports = {
   init, handle,
-  STATE_FILES: ["jarvis.json", "jarvis-memory.json", "jarvis-history.json", "jarvis-chat.json"].concat(govee.STATE_FILES),
+  STATE_FILES: ["jarvis.json", "jarvis-memory.json", "jarvis-history.json", "jarvis-chat.json", "jarvis-chat.imported.json",
+    "jarvis-memory-guide.json", "jarvis-memory-guide.md"].concat(govee.STATE_FILES),
   // For test harnesses: run one server-side tool as a model would.
   runServerTool, TOOLS,
 };

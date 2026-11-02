@@ -36,6 +36,7 @@ answers out loud, puts anything worth seeing on the panel, and can do things:
 | "What am I looking at?" / "answer these questions" / "what does this error mean?" | Looks at the window in front (or the whole main screen), answers in a sentence, and opens the **Chat** app with the screenshot and the full answer |
 | "Ember theme" / "open your settings" | Themes, its settings and start-up options |
 | "Remember that…" | Shared memory |
+| "What did we decide about the bike battery?" / "pull up our chat about the camping trip" / "start a new chat" | Every conversation is kept in a searchable bank of chats; he finds what was said, or opens that chat on screen and carries on in it |
 | "Lights purple" / "lights off" / "dim the lights to 30" | Your Govee strip: over the LAN when it has LAN control, Govee's cloud when it is Wi-Fi only |
 | "Download Qwen 3.5 27B" / "find me a coding model" | Finds GGUF builds on Hugging Face, opens the page, downloads after you tap |
 
@@ -182,10 +183,60 @@ black; borderless is fine.
 **Chat** (an app like Spotify): the conversation — your words, his answers,
 what he looked at (screenshot, tap to enlarge, and the full written answer),
 what he found — live as it happens, with a box to type to him. It opens by
-itself after a look; he says the gist out loud. The log is
-`jarvis-chat.json` (last 200 exchanges) and the screenshots `captures/` (last
-40), both in the data folder, never served except through
-`/api/jarvis/capture/...` on 127.0.0.1. Clear (tap twice) deletes both.
+itself after a look; he says the gist out loud. It follows the chat he is in
+(below); **Chats** lists and searches them all, **New** starts a fresh one,
+**Memory** shows his memory guide, and Delete (tap twice) removes the chat on
+screen with its screenshots. Typing goes into the chat on screen. Screenshots
+are in `captures/` in the data folder, kept with their chats up to 1 GB (past
+that the oldest pictures go; their written answers stay), never served except
+through `/api/jarvis/capture/...` on 127.0.0.1.
+
+### Chats and the memory guide
+
+Every exchange is filed into a **chat**, kept in `jarvis-chats/` in the data
+folder (`assistant-chats.js`; one JSON file per chat, plus `index.json`):
+
+- **Conversations are kept for good.** A new conversation gets a chat of its
+  own, titled and summarised by the note-taker once it goes quiet.
+- **Basic commands** (lights, volume, music, timers, alarms, weather, Discord,
+  the phone, YouTube, the panel, layout, opening apps, PC status: a short
+  request whose tools are all of these) go to one chat per command,
+  "Lights", "Timers"…, and each exchange there is deleted after **7 days**.
+  A quick "lights off" in the middle of a conversation doesn't pull the Chat
+  app away from it.
+- **Picking up an older chat.** A new conversation that clearly continues one
+  ("back to the hub adapter…", or a strong match on what it's about) starts
+  with that chat's latest exchanges, and the Chat app switches to it. A wrong
+  guess is worse than a fresh start, so a weak match starts a new chat.
+  Picking a chat in the app, or "pull up our chat about…", opens it and the
+  conversation carries on there; "start a new chat" (or **New**) starts fresh.
+- **The data bank.** The **history** tool searches every exchange in every
+  chat (BM25 over each exchange, and each chat's title and summary), lists
+  chats, opens, renames and starts them. Exchanges that were only about
+  finding a chat stay out of the index, or they'd outrank the chat they were
+  looking for.
+
+The **memory guide** (`assistant-memory.js`) is what Jarvis reads before
+every answer: it is the last part of his instructions, which tell him to
+check it first and search his history for anything it doesn't spell out. It
+lives in `jarvis-memory-guide.md` (readable, and in the Chat app under
+**Memory**) with its data in `jarvis-memory-guide.json`, in sections:
+
+- **About you**, **Preferences**, **Ongoing topics**: lasting facts.
+- **Notes**: a dated line on practically everything said that isn't a basic
+  command: what you asked and the gist of the answer, plans, decisions,
+  people, purchases. When there are more than 60, the oldest 35 are folded
+  into the sections above (the exchanges themselves stay in the chat bank).
+- **Basic commands**: for each, how many times you asked, how many worked,
+  how many failed, when last, and an example. Nothing else about them is
+  noted.
+
+The note-taker is the everyday local model, held to a JSON schema by
+llama-server's grammar so a small model can't break the file (Claude Haiku
+with a key when the router is down). It runs 40 s after things go quiet, 8
+exchanges at a time, and never during a turn, a think or a game. On first
+start the old Chat log (`jarvis-chat.json`, renamed `.imported.json`) and the
+spoken-turn history are moved into the bank and noted the same way.
 
 ### Thinking hard: the big model
 
@@ -1126,6 +1177,8 @@ wscript "autostart-hidden.vbs" 0
 | `assistant-web.js` | Jarvis's key-less search, images, page reading, weather |
 | `search-ddgs.py` | Search through the `ddgs` Python library when it is installed |
 | `assistant-models.js` | Local models: Hugging Face search, confirmed downloads, adding to the preset |
+| `assistant-chats.js` | Jarvis's chat bank: every exchange filed into chats, search, the 7-day rule for basic commands |
+| `assistant-memory.js` | The memory guide: notes, facts, topics and command counts, kept by the note-taker |
 | `govee.js` | Govee lights over the LAN API (and the cloud API, with a key) |
 | `tts-kokoro.py` | Jarvis's voice: Kokoro-82M, resident, one WAV per sentence |
 | `jarvis.js` / `jarvis.css` | Status bar, the island, alarms + timers, Jarvis's card and settings |

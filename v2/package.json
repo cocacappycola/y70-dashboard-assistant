@@ -67,6 +67,8 @@
           "jarvis.js",
           "jarvis.css",
           "assistant-models.js",
+          "assistant-chats.js",
+          "assistant-memory.js",
           "govee.js",
           "lhm.js",
           "tts-kokoro.py"

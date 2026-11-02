@@ -29,6 +29,33 @@
     #title { font-size: 15px; font-weight: 750; }
     #sub { font-size: 11px; color: var(--t-sub, #a6a6b3); }
     .spacer { flex: 1; }
+    .ht { min-width: 0; flex: 1; }
+    #title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #head .btn { flex-shrink: 0; }
+    #head .btn.on { background: var(--t-accent-soft, rgba(168,92,214,.25)); }
+
+    /* ---- Chats: the list, search, and the memory guide ---- */
+    .pane { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; display: none; flex-direction: column; gap: 8px; }
+    .pane.show { display: flex; }
+    .pane::-webkit-scrollbar { width: 4px; }
+    .pane::-webkit-scrollbar-thumb { background: var(--t-accent-dim, #3a3a42); border-radius: 2px; }
+    .pane > * { flex: none; }
+    #rows { display: flex; flex-direction: column; gap: 8px; }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .chip { font-size: 12px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--t-line, #2c2c33); background: transparent; color: var(--t-sub, #a6a6b3); cursor: pointer; }
+    .chip.on { background: var(--t-accent, #a85cd6); border-color: transparent; color: var(--t-accent-ink, #fff); }
+    .row { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 12px; background: var(--t-surface, #16161a); border: 1px solid var(--t-line, #2c2c33); cursor: pointer; }
+    .row.cur { border-color: var(--t-accent, #a85cd6); }
+    .row .rt { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row .rs { font-size: 12px; color: var(--t-sub, #a6a6b3); margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .row .rm { font-size: 10.5px; color: var(--t-muted, #7a7a85); text-align: right; flex-shrink: 0; line-height: 1.5; }
+    .row .rb { display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 1px 6px; border-radius: 6px; background: rgba(255,255,255,.07); color: var(--t-sub, #a6a6b3); }
+    .row .rx { color: #ffb454; }
+    .hit .rs b { color: var(--t-text, #fff); }
+    .note { font-size: 12px; color: var(--t-muted, #7a7a85); text-align: center; padding: 14px 6px; }
+    #mem .msg { max-width: 100%; }
+    .msg.flash { box-shadow: 0 0 0 2px var(--t-accent, #a85cd6); }
 
     /* ---- The conversation ---- */
     #log { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 12px 8px; display: flex; flex-direction: column; gap: 10px; }
@@ -89,11 +116,23 @@
   <div id="wrap">
     <div id="head">
       <span class="orb"></span>
-      <div><div id="title">Jarvis</div><div id="sub">your conversation</div></div>
-      <span class="spacer"></span>
-      <button class="btn btn--ghost btn--sm" id="clear">Clear</button>
+      <div class="ht"><div id="title">Jarvis</div><div id="sub">your conversation</div></div>
+      <button class="btn btn--ghost btn--sm" id="b-del" hidden>Delete</button>
+      <button class="btn btn--ghost btn--sm" id="b-chats">Chats</button>
+      <button class="btn btn--ghost btn--sm" id="b-new">New</button>
+      <button class="btn btn--ghost btn--sm" id="b-mem">Memory</button>
     </div>
     <div id="log"></div>
+    <div id="list" class="pane">
+      <input class="ui-input" id="q" placeholder="Search everything you've talked about…" autocomplete="off" />
+      <div class="chips" id="kinds">
+        <button class="chip on" data-k="">All</button>
+        <button class="chip" data-k="topic">Conversations</button>
+        <button class="chip" data-k="basic">Basic commands</button>
+      </div>
+      <div id="rows"></div>
+    </div>
+    <div id="mem" class="pane"></div>
     <form id="compose">
       <input class="ui-input" id="say" placeholder="Type to Jarvis…" autocomplete="off" />
       <button class="btn btn--primary btn--sm" id="send" type="submit">Send</button>
@@ -191,15 +230,17 @@
     function render(stick) {
       const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
       log.innerHTML = "";
-      if (!entries.length && !pending) {
-        log.appendChild(el("div", null, '<div id="empty"><span class="orb" style="display:inline-block;width:40px;height:40px"></span><b>Nothing yet</b>Ask Jarvis something, or say “Jarvis, what am I looking at?” — what he sees and says lands here.</div>'));
+      if (!entries.length && !pending && !thinking) {
+        log.appendChild(el("div", null, cur
+          ? '<div id="empty"><b>Nothing here yet</b>This chat is empty.</div>'
+          : '<div id="empty"><span class="orb" style="display:inline-block;width:40px;height:40px"></span><b>A new conversation</b>Ask Jarvis something. Every conversation is kept in Chats, and he picks the right one up again when you come back to it.</div>'));
         return;
       }
       let day = "";
       for (const e of entries) {
         const d = dayOf(e.at);
         if (d !== day) { day = d; log.appendChild(el("div", "day", esc(d))); }
-        if (e.heard) log.appendChild(el("div", "msg me", esc(e.heard)));
+        if (e.heard) { const me = el("div", "msg me", esc(e.heard)); me.dataset.at = e.at; log.appendChild(me); }
         for (const c of e.cards || []) { const ce = cardEl(c); if (ce) log.appendChild(ce); }
         if (e.reply && e.think) log.appendChild(el("div", "msg him deep", '<div class="deep-tag">Thought it through</div>' + md(e.reply)));
         else if (e.reply) log.appendChild(el("div", "msg him", md(e.reply)));
@@ -207,7 +248,7 @@
         const took = e.think ? " · thought for " + (e.think.seconds >= 90 ? Math.round(e.think.seconds / 60) + " min" : e.think.seconds + " s") : "";
         log.appendChild(el("div", "meta", clock(e.at) + took + (tools.length ? " · " + esc(tools.join(", ")) : "") + (e.model ? " · " + esc(e.model) : "")));
       }
-      if (pending) {
+      if (pending && (!pending.chatId || (cur && pending.chatId === cur.id))) {
         log.appendChild(el("div", "msg me", esc(pending.heard)));
         log.appendChild(el("div", "msg him", '<span class="typing"><i></i><i></i><i></i></span>'));
       }
@@ -220,21 +261,173 @@
       if (stick || atBottom) log.scrollTop = log.scrollHeight;
     }
     let thinking = null;         // { question, phase, seconds } while the big model works
+    let cur = null;              // the chat on screen
+    let view = "chat";           // chat | list | mem
+    let listKind = "";
+    let manualAt = 0;            // you picked a chat yourself: Jarvis does not switch away for a minute
+    const following = () => Date.now() - manualAt > 60 * 1000;
 
-    async function load() {
-      try { const r = await (await fetch(API + "chat")).json(); entries = r.entries || []; } catch (e) {}
-      try { const s = (await (await fetch(API + "status")).json()).status; thinking = s && s.think && s.think.busy ? s.think : null; } catch (e) {}
-      render(true);
+    const ago = (t) => {
+      const d = Math.floor((Date.now() - t) / 86400000);
+      return d <= 0 ? clock(t) : d === 1 ? "yesterday" : d < 7 ? new Date(t).toLocaleDateString([], { weekday: "short" }) : new Date(t).toLocaleDateString([], { month: "short", day: "numeric" });
+    };
+    const daysLeft = (t) => Math.max(0, Math.ceil((t - Date.now()) / 86400000));
+
+    function setView(v) {
+      view = v;
+      log.style.display = v === "chat" ? "" : "none";
+      $("#list").classList.toggle("show", v === "list");
+      $("#mem").classList.toggle("show", v === "mem");
+      $("#b-chats").classList.toggle("on", v === "list");
+      $("#b-mem").classList.toggle("on", v === "mem");
+      $("#compose").style.display = v === "mem" ? "none" : "";
+      if (v === "list") loadList();
+      if (v === "mem") loadMemory();
+      head();
     }
 
-    // ---- Live, as he works ----------------------------------------------------
+    function head() {
+      const del = $("#b-del");
+      if (view === "list") { $("#title").textContent = "Chats"; $("#sub").textContent = "every conversation, kept · basic commands clear after 7 days"; del.hidden = true; return; }
+      if (view === "mem") { $("#title").textContent = "Memory guide"; $("#sub").textContent = "what Jarvis knows, kept up to date from every conversation"; del.hidden = true; return; }
+      if (!cur) { $("#title").textContent = "Jarvis"; $("#sub").textContent = "a new conversation"; del.hidden = true; return; }
+      $("#title").textContent = cur.title;
+      $("#sub").textContent = cur.kind === "basic"
+        ? "Basic commands · each clears after 7 days"
+        : (cur.summary || ((n) => n + (n === 1 ? " exchange" : " exchanges") + " · since " + ago(cur.created))((cur.turns || []).length));
+      del.hidden = false;
+    }
+
+    async function openChat(id, opts) {
+      const o = opts || {};
+      if (!id) return;
+      try {
+        const r = await (await fetch(API + "chats/" + id)).json();
+        if (!r.ok) return;
+        cur = r.chat;
+        entries = cur.turns || [];
+        if (o.manual) manualAt = Date.now();
+        setView("chat");
+        render(true);
+        if (o.at != null) flashTurn(o.at);
+      } catch (e) {}
+    }
+    function flashTurn(at) {
+      const m = log.querySelector('[data-at="' + at + '"]');
+      if (!m) return;
+      m.scrollIntoView({ block: "center" });
+      m.classList.add("flash");
+      setTimeout(() => m.classList.remove("flash"), 2500);
+    }
+
+    // ---- The list, and searching everything said ---------------------------------
+    let listTimer = 0;
+    async function loadList() {
+      const q = $("#q").value.trim();
+      const rows = $("#rows");
+      if (q.length >= 2) {
+        const r = await fetch(API + "chats/search?q=" + encodeURIComponent(q)).then((x) => x.json()).catch(() => ({ hits: [] }));
+        const hits = (r.hits || []).filter((h) => !listKind || h.kind === listKind);
+        rows.innerHTML = hits.length ? "" : '<div class="note">Nothing you have said matches that.</div>';
+        for (const h of hits) {
+          const plain = String(h.reply || "").replace(/[*_`#|]+/g, "").slice(0, 160);
+          const body = h.heard ? "<b>You:</b> " + esc(h.heard) + " · " + esc(plain) : esc(plain);
+          const row = el("div", "row hit", "<div style='flex:1;min-width:0'><div class='rt'>" + esc(h.title) + "</div><div class='rs'>" + body + "</div></div><div class='rm'>" + ago(h.at) + "</div>");
+          row.addEventListener("click", () => openChat(h.chatId, { manual: true, at: h.heard ? h.at : null }));
+          rows.appendChild(row);
+        }
+        return;
+      }
+      const r = await fetch(API + "chats").then((x) => x.json()).catch(() => ({ chats: [] }));
+      const list = (r.chats || []).filter((c) => !listKind || c.kind === listKind);
+      rows.innerHTML = list.length ? "" : '<div class="note">No chats yet. Talk to Jarvis and they appear here.</div>';
+      for (const c of list) {
+        const meta = ago(c.updated) + "<br>" + c.count + (c.count === 1 ? " exchange" : " exchanges") +
+          (c.kind === "basic" && c.expires ? "<br><span class='rx'>oldest clears in " + daysLeft(c.expires) + " d</span>" : "");
+        const row = el("div", "row" + (cur && cur.id === c.id ? " cur" : ""),
+          "<div style='flex:1;min-width:0'><div class='rt'>" + (c.kind === "basic" ? "<span class='rb'>basic</span> " : "") + esc(c.title) + "</div><div class='rs'>" + esc(c.summary || "") + "</div></div><div class='rm'>" + meta + "</div>");
+        row.addEventListener("click", () => openChat(c.id, { manual: true }));
+        rows.appendChild(row);
+      }
+    }
+    $("#q").addEventListener("input", () => { clearTimeout(listTimer); listTimer = setTimeout(loadList, 250); });
+    $("#kinds").addEventListener("click", (e) => {
+      const b = e.target.closest(".chip");
+      if (!b) return;
+      listKind = b.dataset.k;
+      document.querySelectorAll("#kinds .chip").forEach((x) => x.classList.toggle("on", x === b));
+      loadList();
+    });
+
+    async function loadMemory() {
+      const r = await fetch(API + "memory-guide").then((x) => x.json()).catch(() => null);
+      const box = $("#mem");
+      box.innerHTML = "";
+      box.appendChild(el("div", "msg him", r && r.markdown ? md(r.markdown.replace(/^# .*\n/, "")) : "Couldn't load the memory guide."));
+    }
+
+    $("#b-chats").addEventListener("click", () => setView(view === "list" ? "chat" : "list"));
+    $("#b-mem").addEventListener("click", () => setView(view === "mem" ? "chat" : "mem"));
+    // New: the next thing you ask starts a fresh chat.
+    $("#b-new").addEventListener("click", async () => {
+      await fetch(API + "chats/new", { method: "POST" }).catch(() => {});
+      cur = null; entries = []; pending = null; manualAt = 0;
+      setView("chat");
+      render(true);
+    });
+    // Delete the chat on screen (asks once).
+    let armed = 0;
+    $("#b-del").addEventListener("click", async () => {
+      if (!cur) return;
+      if (Date.now() - armed > 4000) { armed = Date.now(); $("#b-del").textContent = "Tap again"; setTimeout(() => { $("#b-del").textContent = "Delete"; }, 4000); return; }
+      armed = 0; $("#b-del").textContent = "Delete";
+      await fetch(API + "chats/" + cur.id + "/delete", { method: "POST" }).catch(() => {});
+      cur = null; entries = [];
+      setView("list");
+    });
+
+    async function load() {
+      try {
+        const r = await (await fetch(API + "chats")).json();
+        if (r.last) await openChat(r.last); else { render(true); head(); }
+      } catch (e) { render(true); head(); }
+      try { const s = (await (await fetch(API + "status")).json()).status; thinking = s && s.think && s.think.busy ? s.think : null; if (thinking) render(true); } catch (e) {}
+    }
+
+    // ---- Live, as he works: the app follows the chat he is in ----------------------
     function connect() {
       const es = new EventSource(API + "events");
       es.onmessage = (m) => {
         let ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
-        if (ev.type === "chat-pending") { pending = { heard: ev.heard, at: ev.at }; render(true); }
-        if (ev.type === "chat") { pending = null; entries.push(ev.entry); entries = entries.slice(-120); render(true); }
-        if (ev.type === "chat-cleared") { entries = []; pending = null; render(true); }
+        if (ev.type === "chat-pending") {
+          pending = { heard: ev.heard, at: ev.at, chatId: ev.chatId || null };
+          if (ev.chatId && (!cur || cur.id !== ev.chatId) && following()) openChat(ev.chatId);
+          else if (view === "chat") render(true);
+        }
+        if (ev.type === "chat" && ev.entry) {
+          pending = null;
+          const id = ev.entry.chatId;
+          if (cur && cur.id === id) {
+            entries.push(ev.entry);
+            cur.turns = entries;
+            if (ev.entry.chatTitle) cur.title = ev.entry.chatTitle;
+            head();
+            if (view === "chat") render(true);
+          } else if (!cur || (following() && !(ev.entry.chatKind === "basic" && cur.kind === "topic"))) openChat(id);
+          else if (view === "chat") render();   // (a quick command mid-conversation doesn't pull the app away)
+          if (view === "list") loadList();
+        }
+        // He opened a chat (asked to, or a new one): show it.
+        if (ev.type === "chat-open" && ev.chat) { manualAt = 0; openChat(ev.chat); }
+        // A question that continues an older chat.
+        if (ev.type === "chat-route" && ev.chat && following()) openChat(ev.chat);
+        // Titles and summaries from the note-taker.
+        if (ev.type === "chats") {
+          if (view === "list") loadList();
+          if (cur) fetch(API + "chats/" + cur.id).then((x) => x.json()).then((r) => {
+            if (r.ok && cur && r.chat.id === cur.id) { cur.title = r.chat.title; cur.summary = r.chat.summary; head(); }
+          }).catch(() => {});
+        }
         if (ev.type === "think") {
           thinking = ev.state === "started" || ev.state === "progress" ? { question: ev.question, phase: ev.phase, seconds: ev.seconds } : null;
           render(ev.state === "started");
@@ -254,25 +447,21 @@
     function openUrl(url) {
       try { parent.y70Jarvis.runTool("open_web", { url }); } catch (e) {}
     }
-    // Clearing deletes the log and the screenshots, so it asks once.
-    let armed = 0;
-    $("#clear").addEventListener("click", async () => {
-      if (Date.now() - armed > 4000) { armed = Date.now(); $("#clear").textContent = "Tap again to clear"; setTimeout(() => { $("#clear").textContent = "Clear"; }, 4000); return; }
-      armed = 0; $("#clear").textContent = "Clear";
-      await fetch(API + "chat/clear", { method: "POST" });
-    });
-
     // Typing: the panel lends the keyboard while the box has focus.
     const say = $("#say");
     const kb = (on) => { try { parent.postMessage({ type: "y70:keyboard", on }, "*"); } catch (e) {} };
     say.addEventListener("focus", () => kb(true));
     say.addEventListener("blur", () => kb(false));
-    $("#compose").addEventListener("submit", (e) => {
+    // What you type goes into the chat on screen (New already told him to start fresh).
+    $("#compose").addEventListener("submit", async (e) => {
       e.preventDefault();
       const t = say.value.trim();
       if (!t) return;
       say.value = "";
       say.blur();
+      if (view !== "chat") setView("chat");
+      if (cur && cur.kind === "topic") await fetch(API + "chats/" + cur.id + "/pick", { method: "POST" }).catch(() => {});
+      manualAt = Date.now();
       try { parent.y70Jarvis.ask(t); } catch (err) {}
     });
 

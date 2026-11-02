@@ -1055,7 +1055,8 @@ const server = http.createServer((req, res) => {
   }
   // Screenshots Jarvis took (the data folder's captures/, which is beside the
   // code when run from source) are served only through /api/jarvis/capture.
-  if (/[\\/]captures[\\/]/i.test(filePath) || /[\\/]downloads[\\/]/i.test(filePath)) {
+  // The same for the chat bank (every conversation, jarvis-chats/).
+  if (/[\\/](captures|downloads|jarvis-chats)[\\/]/i.test(filePath)) {
     res.writeHead(403);
     return res.end("Forbidden");
   }
