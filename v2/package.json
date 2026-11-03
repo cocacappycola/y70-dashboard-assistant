@@ -51,6 +51,7 @@
           "shell.html",
           "app-web.html",
           "app-chat.html",
+          "app-code.html",
           "weather-app.html",
           "widget-*.html",
           "styles.css",
@@ -73,7 +74,8 @@
           "assistant-usage.js",
           "govee.js",
           "lhm.js",
-          "tts-kokoro.py"
+          "tts-kokoro.py",
+          "tts-qwen.py"
         ]
       },
       {

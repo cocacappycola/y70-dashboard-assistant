@@ -1017,8 +1017,32 @@ function handlePhonePost(req, res) {
 }
 
 // ---- Server ----------------------------------------------------------------
+// The API is for the panel's own pages (and the helpers on this PC, which send
+// no Origin). A web page anywhere else, in a browser or in the panel's web
+// apps, can send requests to 127.0.0.1 too: without this it could start a
+// Jarvis turn, change his settings or reach the file tools. So a request from
+// another origin, a cross-site fetch, or one addressed to any other host name
+// (DNS rebinding) is refused.
+const OWN = new Set(["http://127.0.0.1:" + PORT, "http://localhost:" + PORT]);
+function foreign(req) {
+  const host = String(req.headers.host || "").toLowerCase();
+  if (host && host !== "127.0.0.1:" + PORT && host !== "localhost:" + PORT) return "host";
+  const origin = req.headers.origin;
+  if (origin != null && !OWN.has(String(origin).toLowerCase())) return "origin";
+  const site = req.headers["sec-fetch-site"];
+  if (site && site !== "same-origin" && site !== "none") return "site";
+  return null;
+}
+
 const server = http.createServer((req, res) => {
   let urlPath = decodeURIComponent(req.url.split("?")[0]);
+  if (urlPath.startsWith("/api/")) {
+    const why = foreign(req);
+    if (why) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, error: "not from the panel (" + why + ")" }));
+    }
+  }
 
   if (req.method === "POST" && urlPath === "/api/claude") return handleClaude(req, res);
   if (req.method === "GET" && urlPath === "/api/claude-stats") return handleClaudeStats(req, res);

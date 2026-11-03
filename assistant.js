@@ -66,9 +66,13 @@ const DEFAULTS = {
   stopWords: true,                  // "stop" / "Jarvis..." cut him off while he talks
   bargeIn: false,                   // just talking over him interrupts (headphones)
   speak: true,
-  tts: "",                          // kokoro | windows; "" = Kokoro when installed
+  tts: "",                          // qwen | kokoro | windows; "" = Kokoro when installed
   kokoroDir: "",                    // kokoro-v1.0.onnx + voices-v1.0.bin
   kokoroVoice: "bm_george",
+  qwenDir: "",                      // Qwen3-TTS: qwen3-venv\ + Qwen3-TTS-12Hz-<size>-Base\; "" = the Kokoro folder
+  qwenModel: "0.6B",                // 0.6B | 1.7B
+  qwenVoice: "",                    // the clip to clone, its words in a .txt beside it; "" = <folder>\voices\jarvis.mp3
+  qwenGameFree: true,               // unload it while a game is in front (Kokoro speaks meanwhile)
   voice: "Microsoft Mark",          // the Windows voice (fallback)
   rate: 1.05,
   name: "",
@@ -105,8 +109,10 @@ function saveSettings(patch) {
   next.endSilence = Math.round(Math.max(0.5, Math.min(4, Number(next.endSilence) || 1.5)) * 4) / 4;
   next.rate = Math.max(0.6, Math.min(2, Number(next.rate) || 1));
   next.wakePhrase = String(next.wakePhrase || "jarvis").trim().toLowerCase().slice(0, 30) || "jarvis";
-  for (const k of ["name", "addressAs", "voice", "localBat", "graphFile", "localUrl", "memoryUrl", "whisperDir", "kokoroDir"]) next[k] = String(next[k] || "").slice(0, 400);
-  if (!["", "kokoro", "windows"].includes(next.tts)) next.tts = "";
+  for (const k of ["name", "addressAs", "voice", "localBat", "graphFile", "localUrl", "memoryUrl", "whisperDir", "kokoroDir", "qwenDir", "qwenVoice"]) next[k] = String(next[k] || "").slice(0, 400);
+  if (!["", "qwen", "kokoro", "windows"].includes(next.tts)) next.tts = "";
+  if (!["0.6B", "1.7B"].includes(next.qwenModel)) next.qwenModel = DEFAULTS.qwenModel;
+  next.qwenGameFree = next.qwenGameFree !== false;
   if (!/^[a-z]{2}_[a-z]+$/.test(String(next.kokoroVoice || ""))) next.kokoroVoice = DEFAULTS.kokoroVoice;
   if (!["", "whisper", "online", "offline"].includes(next.stt)) next.stt = "";
   next.about = String(next.about || "").slice(0, 4000);
@@ -116,8 +122,13 @@ function saveSettings(patch) {
   // Whisper restarts to pick up GPU/CPU or a new folder, and stops (freeing
   // its VRAM) when another recognizer is chosen.
   if (prev && (prev.whisperGpu !== next.whisperGpu || prev.whisperDir !== next.whisperDir || sttEngine() !== "whisper")) whisperStop();
-  if (prev && (prev.kokoroDir !== next.kokoroDir || ttsEngine() !== "kokoro")) { kokoroStop(); if (prev.kokoroDir !== next.kokoroDir) kokoro.err = null; }
-  if (ttsEngine() === "kokoro") kokoroStart();
+  // Kokoro also stands in for Qwen (while it loads, in a game, if it fails).
+  if (prev && (prev.kokoroDir !== next.kokoroDir || next.tts === "windows")) { kokoroStop(); if (prev.kokoroDir !== next.kokoroDir) kokoro.err = null; }
+  if (next.tts !== "windows" && kokoroPaths()) kokoroStart();
+  // Qwen restarts for a new model, folder or voice, and stops (freeing its
+  // VRAM) when another engine is chosen.
+  if (prev && (prev.qwenModel !== next.qwenModel || prev.qwenDir !== next.qwenDir || prev.qwenVoice !== next.qwenVoice || next.tts !== "qwen")) { qwenStop(); qwen.err = null; }
+  if (next.tts === "qwen" && !(game.on && next.qwenGameFree)) qwenStart();
   applyVoiceSettings();
   // Think hard switched off mid-think: stop it and give the router back.
   if (prev && prev.thinkHard && !next.thinkHard && think.job) thinkCancel("think hard was turned off");
@@ -415,7 +426,94 @@ function kokoroPaths() {
 
 function ttsEngine() {
   if (settings.tts === "windows") return "windows";
+  if (settings.tts === "qwen" && qwenPaths() && qwen.err !== "unavailable" && !(game.on && settings.qwenGameFree)) return "qwen";
   return kokoroPaths() && kokoro.err !== "unavailable" ? "kokoro" : "windows";
+}
+
+// ------------------------------------------------------------------- qwen ---
+//  Jarvis's cloned voice: Qwen3-TTS (tts-qwen.py, faster-qwen3-tts in its own
+//  venv), resident on the GPU. It takes 25-35 s to load and warm up, then
+//  makes speech 2.5-3.3x faster than real time (measured: a 4 s sentence in
+//  about 1.2 s). Until it is ready, in a game (if it frees the GPU) or if it
+//  fails, Kokoro speaks instead.
+const qwen = { proc: null, buf: "", ready: false, starting: null, err: null, seq: 0, waiters: new Map(), info: null };
+
+function qwenPaths() {
+  const dir = settings.qwenDir || settings.kokoroDir;
+  if (!dir) return null;
+  const python = path.join(dir, "qwen3-venv", "Scripts", "python.exe");
+  const model = path.join(dir, "Qwen3-TTS-12Hz-" + settings.qwenModel + "-Base");
+  const voice = settings.qwenVoice || path.join(dir, "voices", "jarvis.mp3");
+  const words = voice.replace(/\.[^.\\/]+$/, "") + ".txt";
+  if (![python, path.join(model, "config.json"), voice, words].every((p) => fs.existsSync(p))) return null;
+  return { dir, python, model, voice, words };
+}
+
+function qwenStart() {
+  if (qwen.ready) return Promise.resolve(true);
+  if (qwen.starting) return qwen.starting;
+  const p = qwenPaths();
+  if (!p) return Promise.resolve(false);
+  qwen.starting = new Promise((resolve) => {
+    const child = spawn(p.python, [path.join(H.ROOT, "tts-qwen.py"), p.model, p.voice, p.words], {
+      cwd: p.dir, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8", USE_TF: "0", TRANSFORMERS_NO_TF: "1", HF_HUB_OFFLINE: "1" },
+    });
+    qwen.proc = child;
+    const timer = setTimeout(() => { qwen.err = "Qwen3-TTS took too long to load"; resolve(false); }, 180000);
+    child.stdout.on("data", (d) => {
+      qwen.buf += d.toString();
+      let i;
+      while ((i = qwen.buf.indexOf("\n")) >= 0) {
+        const line = qwen.buf.slice(0, i).trim();
+        qwen.buf = qwen.buf.slice(i + 1);
+        if (!line || line[0] !== "{") continue;
+        let m;
+        try { m = JSON.parse(line); } catch (e) { continue; }
+        if (m.type === "ready") {
+          qwen.ready = true; qwen.err = null; qwen.info = { model: m.model, loadSeconds: m.loadSeconds, vramGB: m.vramGB };
+          clearTimeout(timer); resolve(true);
+          broadcast({ type: "status", status: status() });
+        } else if (m.type === "error") {
+          qwen.err = /ModuleNotFoundError|No module/.test(m.error) ? "unavailable" : m.error.slice(0, 300);
+          clearTimeout(timer); resolve(false);
+          broadcast({ type: "status", status: status() });
+        } else if (m.type === "tts") {
+          const w = qwen.waiters.get(m.id);
+          if (w) { qwen.waiters.delete(m.id); w(m); }
+        }
+      }
+      if (qwen.buf.length > 16e6) qwen.buf = "";
+    });
+    child.stderr.on("data", () => {});
+    child.on("error", (e) => { qwen.err = /ENOENT/.test(e.code || "") ? "unavailable" : e.message; clearTimeout(timer); resolve(false); });
+    child.on("exit", () => {
+      qwen.proc = null; qwen.ready = false; qwen.buf = "";
+      for (const [, w] of qwen.waiters) w({ error: "qwen exited" });
+      qwen.waiters.clear();
+      broadcast({ type: "status", status: status() });
+    });
+  }).finally(() => { qwen.starting = null; });
+  broadcast({ type: "status", status: status() });
+  return qwen.starting;
+}
+
+function qwenStop() {
+  if (qwen.proc) { try { qwen.proc.kill(); } catch (e) {} }
+  qwen.proc = null; qwen.ready = false; qwen.info = null;
+}
+
+function qwenSpeak(text) {
+  return new Promise((resolve) => {
+    if (!qwen.ready || !qwen.proc) return resolve({ error: "qwen not ready" });
+    const id = ++qwen.seq;
+    const timer = setTimeout(() => { qwen.waiters.delete(id); resolve({ error: "timed out" }); }, 30000);
+    qwen.waiters.set(id, (m) => { clearTimeout(timer); resolve(m); });
+    try {
+      const line = JSON.stringify({ id, text: String(text).slice(0, 2000) })
+        .replace(/[\u007f-￿]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+      qwen.proc.stdin.write(line + "\n");
+    } catch (e) { qwen.waiters.delete(id); clearTimeout(timer); resolve({ error: e.message }); }
+  });
 }
 
 function kokoroStart() {
@@ -490,10 +588,18 @@ function speechText(t) {
     .replace(/…/g, "...").replace(/\s*[–—]\s*/g, ", ").replace(/ /g, " ");
 }
 
-// Kokoro when it is the engine and it works; a Windows voice otherwise.
+// Qwen when it is the engine and ready; Kokoro when it is the engine, or
+// standing in for Qwen; a Windows voice otherwise.
 async function speak(text) {
   text = speechText(text);
-  if (ttsEngine() === "kokoro") {
+  const engine = ttsEngine();
+  if (engine === "qwen") {
+    if (qwen.ready) {
+      const r = await qwenSpeak(text);
+      if (r && r.data) return r;
+    } else if (!qwen.starting && !qwen.err) qwenStart();
+  }
+  if (engine === "kokoro" || (engine === "qwen" && kokoroPaths())) {
     const r = await kokoroSpeak(text);
     if (r && r.data) return r;
   }
@@ -537,6 +643,11 @@ function status() {
     tts: {
       engine: ttsEngine(), installed: !!kokoroPaths(), running: kokoro.ready,
       voices: kokoro.voices, error: kokoro.err,
+      qwen: (() => {
+        const p = qwenPaths();
+        return { installed: !!p, ready: qwen.ready, loading: !!qwen.starting, error: qwen.err, info: qwen.info,
+          voice: p ? p.voice : null, model: settings.qwenModel, freedForGame: !!(game.on && settings.qwenGameFree && settings.tts === "qwen") };
+      })(),
     },
     game,
     local: {
@@ -600,6 +711,11 @@ function isBig(id, file) {
 // While the big model is thinking it is the one loaded (questions meanwhile get
 // an instant "still thinking"; see handleTurn). The next question after it
 // finishes swaps the everyday model back in.
+// A Code conversation can ask for its own model (except in a game).
+function localModelFor(conv) {
+  if (conv && conv.localModel && !(settings.autoGameModel && game.on) && !think.job) return conv.localModel;
+  return localModelNow();
+}
 function localModelNow() {
   if (settings.autoGameModel && game.on) return settings.gameModel || "jarvis-4b";
   if (think.job && !think.job.pending && thinkReady()) return settings.thinkModel;
@@ -610,6 +726,11 @@ function localModelNow() {
 // back now rather than at the next question. When the game ends, the everyday
 // model comes back.
 async function onGameChange() {
+  // The cloned voice gives its VRAM back for the game (Kokoro speaks meanwhile)
+  // and loads again after.
+  if (settings.tts === "qwen" && settings.qwenGameFree) {
+    if (game.on) qwenStop(); else qwenStart();
+  }
   broadcast({ type: "status", status: status() });
   if (!settings.autoGameModel) return;
   if (!game.on) { bootLoad(true); return; }
@@ -1397,7 +1518,7 @@ const TOOLS = [
   },
   {
     name: "layout", where: "client", core: true,
-    description: "The panel's screen: what is where, and changing it. Apps (spotify, weather, youtube, shorts, tiktok, snapchat, web) and widgets (claude, weather, pc, calc, media, lyrics, audio, timer, notes, discord, face, pin) share one column of resizable panels under the main app. status: the main app, every panel top to bottom with its height, and what each is for. open (app): the main area. focus (app): that app gets the whole screen, widgets hidden; exit_focus brings them back. home: the Home layout; save_home saves what is on screen as Home. widget (name, on). dock (app, height, position): an app in a panel among the widgets; undock (app). resize (name, height in px, or size small/medium/large/half). move (name, position top/bottom/number, or before/after a panel's name). collapse / expand (name). scene (name: home, working, gaming, music, idle); save_scene (name). calculator (expression): put a sum on the calculator widget and solve it. pin (window: part of its title or program) holds another program's window in the pin widget; unpin.",
+    description: "The panel's screen: what is where, and changing it. Apps (spotify, weather, youtube, shorts, tiktok, snapchat, web, chat, code = Jarvis Code) and widgets (claude, weather, pc, calc, media, lyrics, audio, timer, notes, discord, face, pin) share one column of resizable panels under the main app. status: the main app, every panel top to bottom with its height, and what each is for. open (app): the main area. focus (app): that app gets the whole screen, widgets hidden; exit_focus brings them back. home: the Home layout; save_home saves what is on screen as Home. widget (name, on). dock (app, height, position): an app in a panel among the widgets; undock (app). resize (name, height in px, or size small/medium/large/half). move (name, position top/bottom/number, or before/after a panel's name). collapse / expand (name). scene (name: home, working, gaming, music, idle); save_scene (name). calculator (expression): put a sum on the calculator widget and solve it. pin (window: part of its title or program) holds another program's window in the pin widget; unpin.",
     input_schema: {
       type: "object",
       properties: {
@@ -2348,11 +2469,13 @@ async function claudeStep(conv, emit, signal, noTools) {
   const c = claudeClient();
   if (!c) throw new UserFacing("There's no Claude API key yet. Add one in Jarvis settings.");
   const model = settings.claudeModel;
+  const sys = conv.code ? codeSystemPrompt(conv) : systemPrompt(false);
+  if (conv.code) fitContext(conv, ctxWindow(model), sys.length);
   const params = {
     model,
-    max_tokens: 4096,
-    system: [{ type: "text", text: systemPrompt(false), cache_control: { type: "ephemeral" } }],
-    tools: claudeTools(),
+    max_tokens: conv.code ? 8192 : 4096,
+    system: [{ type: "text", text: sys, cache_control: { type: "ephemeral" } }],
+    tools: toolsFor(conv, true).map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
     messages: withNudge(conv.messages, conv.nudge),
   };
   // The history holds tool calls, so the tools must stay declared; "none"
@@ -2439,13 +2562,15 @@ function toOpenAI(system, messages) {
 
 async function localStep(conv, emit, signal, noTools) {
   const base = settings.localUrl.replace(/\/+$/, "");
-  const model = localModelNow();
+  const model = localModelFor(conv);
   const ini = models.readIni(settings).find((m) => m.id === model);
   const big = isBig(model, ini && ini.file);
   if (local.loaded !== model) emit({ type: "status", text: "Waking " + model + "…" });
-  const messages = toOpenAI(systemPrompt(!big), withNudge(conv.messages, conv.nudge));
-  const tools = openaiTools(big);
   const window = ctxWindow(model);
+  const sys = conv.code ? codeSystemPrompt(conv) : systemPrompt(!big);
+  if (conv.code) fitContext(conv, window, sys.length);
+  const messages = toOpenAI(sys, withNudge(conv.messages, conv.nudge));
+  const tools = toolsFor(conv, big).map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } }));
   // A guess at the prompt's size until the server says (about 3.6 characters a token).
   const estIn = Math.round((JSON.stringify(messages).length + JSON.stringify(tools).length) / 3.6);
   const t0 = Date.now();
@@ -2459,7 +2584,7 @@ async function localStep(conv, emit, signal, noTools) {
       body: JSON.stringify({
         model,
         stream: true,
-        max_tokens: 1500,
+        max_tokens: conv.code ? 4096 : 1500,
         messages,
         tools,
         tool_choice: noTools ? "none" : "auto",
@@ -2554,7 +2679,8 @@ async function chooseProvider() {
 const CONV_IDLE_MS = 5 * 60 * 1000;
 const convs = new Map();
 setInterval(() => {
-  for (const [id, c] of convs) if (Date.now() - c.at > CONV_IDLE_MS) convs.delete(id);
+  // A coding session keeps its thread for an hour; asking Jarvis, five minutes.
+  for (const [id, c] of convs) if (Date.now() - c.at > (c.code ? 60 * 60 * 1000 : CONV_IDLE_MS)) convs.delete(id);
 }, 60000).unref();
 
 function newConv() {
@@ -2636,13 +2762,18 @@ function withNudge(messages, nudge) {
   return out;
 }
 
+// A coding task takes many small steps (read, read, edit, check...).
+const CODE_MAX_STEPS = 30;
+
 async function runLoop(conv, emit, signal) {
-  for (let step = 0; step < MAX_STEPS; step++) {
+  const maxSteps = conv.code ? CODE_MAX_STEPS : MAX_STEPS;
+  for (let step = 0; step < maxSteps; step++) {
     const provider = conv.provider;
-    const last = step === MAX_STEPS - 1;
+    const last = step === maxSteps - 1;
     emit({ type: "thinking", provider });
-    // Watch only before the first tool of the turn, and only once.
-    const watch = !last && !conv.nudged && conv.log.tools.length === 0;
+    // Watch only before the first tool of the turn, and only once. (Not in
+    // Code: "Let me read the file" there is just how a step starts.)
+    const watch = !conv.code && !last && !conv.nudged && conv.log.tools.length === 0;
     const heard = conv.log.heard || "";
     // Asked to think hard, the 9B tends to start answering itself before it
     // hands over: hold its words, and drop them if it does hand over.
@@ -2654,7 +2785,7 @@ async function runLoop(conv, emit, signal) {
     if (r.usage) {
       const u = conv.log.usage || (conv.log.usage = freshUsage());
       u.in += r.usage.in; u.cached += r.usage.cached; u.out += r.usage.out; u.requests++; u.ms += r.usage.ms;
-      usage.request({ kind: "turn", provider, model: r.model, chatId: conv.chatId, ...r.usage });
+      usage.request({ kind: conv.code ? "code" : "turn", provider, model: r.model, chatId: conv.chatId, ...r.usage });
       meter(conv, emit, { stage: "step", model: r.model, window: r.usage.window, ctx: r.usage.in + r.usage.out, out: r.usage.out, tps: r.usage.genMs ? r.usage.out / (r.usage.genMs / 1000) : 0 });
     }
     const usedTool = r.content.some((b) => b.type === "tool_use");
@@ -2716,6 +2847,8 @@ async function runLoop(conv, emit, signal) {
         }, conv);
       } catch (e) { out = "Tool failed: " + e.message; isErr = true; }
       emit({ type: "tool", id: u.id, name: u.name, status: "done", ok: !isErr });
+      // Jarvis Code shows what each step came back with.
+      if (conv.code) emit({ type: "tool-result", id: u.id, name: u.name, ok: !isErr, text: String(out == null ? "" : out).slice(0, 4000) });
       if (isErr) conv.log.failed = true;
       countTool(conv, u.name, !isErr, Date.now() - tStart);
       meter(conv, emit, { stage: "tool", model: conv.model });
@@ -2784,7 +2917,7 @@ function lastChatId() {
   return l.length ? l[0].id : null;
 }
 function fileTurn(conv, turn) {
-  const key = chats.classify(turn.heard, turn.tools);
+  const key = conv.code ? null : chats.classify(turn.heard, turn.tools);
   let chat;
   if (key) {
     chat = chats.addTurn(chats.basicChat(key).id, turn);
@@ -2897,7 +3030,7 @@ function askPermission(conv, emit, req) {
   if (!req.write && mode === "ask") return Promise.resolve(true);
   if (conv && conv.fsAllow && (conv.fsAllow === "all" || (!req.write && conv.fsAllow === "read"))) return Promise.resolve(true);
   const id = "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const ev = { type: "permission", id, tool: req.tool, action: req.action, write: !!req.write, title: req.title, path: req.path, detail: String(req.detail || "").slice(0, 1500), at: Date.now(), timeout: PERM_WAIT_MS };
+  const ev = { type: "permission", id, tool: req.tool, action: req.action, write: !!req.write, title: req.title, path: req.path, detail: String(req.detail || "").slice(0, 1500), at: Date.now(), timeout: PERM_WAIT_MS, source: conv && conv.code ? "code" : "jarvis" };
   emit({ type: "status", text: "Waiting for your OK on the panel…" });
   emit(ev);
   broadcast(ev);
@@ -2936,6 +3069,93 @@ async function fsTool(name, a, emit, conv) {
   } catch (e) {
     return [(e.code === "EACCES" || e.code === "EPERM" ? "Windows won't let me: " : "That failed: ") + e.message, true];
   }
+}
+
+// ---- Jarvis Code: working in a project ---------------------------------------------
+// The Code app sends turns with { code: { root } }. Such a conversation gets a
+// short coding prompt of its own (the everyday one is 9k tokens; the 9B has
+// 16k), only the tools coding needs, more steps, longer answers, no "say it
+// aloud" rules, and its own chat per project. Old tool results are shortened
+// as the conversation outgrows the model's context.
+function codeFile() { return path.join(H.DATA, "jarvis-code.json"); }
+function codeStore() {
+  try { const j = JSON.parse(fs.readFileSync(codeFile(), "utf8")); if (j && j.projects) return j; } catch (e) {}
+  return { projects: {} };
+}
+function codeSave(s) { try { fs.writeFileSync(codeFile(), JSON.stringify(s, null, 1)); } catch (e) {} }
+
+async function codeProject(root, touch) {
+  const p = fileTools.resolve(root, null);
+  const g = fileTools.guard(p, false);
+  if (g) return { ok: false, error: g };
+  let st = null;
+  try { st = fs.statSync(p); } catch (e) {}
+  if (!st || !st.isDirectory()) return { ok: false, error: "No folder at " + p };
+  const s = codeStore();
+  const key = p.toLowerCase();
+  const e = s.projects[key] || (s.projects[key] = { root: p, name: path.basename(p) || p, chatId: null, at: 0 });
+  if (!e.chatId || !chats.get(e.chatId)) e.chatId = chats.create({ kind: "topic", title: "Code: " + e.name, autoTitle: false }).id;
+  if (touch !== false) e.at = Date.now();
+  codeSave(s);
+  return { ok: true, ...e };
+}
+
+const CODE_TOOLS = new Set(["files", "repo", "web_search", "read_page"]);
+function toolsFor(conv, big) {
+  if (conv && conv.code) return TOOLS.filter((t) => CODE_TOOLS.has(t.name) && toolOn(t));
+  return TOOLS.filter((t) => (big || t.core) && toolOn(t));
+}
+
+function codeSystemPrompt(conv) {
+  const c = conv.code;
+  return [
+    "You are Jarvis, " + who() + "'s coding assistant, working in the project \"" + c.name + "\" at " + c.root + ". This is Jarvis Code, an app on their panel: what you write is read, not spoken, so write normally, with markdown and code in fenced blocks.",
+    "",
+    "How you work:",
+    "1. Look before you change anything. In a new conversation start with repo overview. Find things with files find (by name or text) and read the files you need with files read (big ones a part at a time). Never guess what a file says.",
+    "2. Change files with files edit: copy the exact lines from what you read, enough of them to be unique, and change only what the task needs. New files with files write. Keep to the code's own style, naming and comments.",
+    "3. Work in small steps and check them: after an edit, read the changed part back if it matters; repo git with \"diff\" shows what you did.",
+    "4. Finish with a short summary: what you changed, file by file, and anything " + who() + " should check or run.",
+    "5. Commit, push, delete, open programs or clone only when asked. Never force-push, reset --hard or throw work away.",
+    "6. Every change waits for " + who() + "'s OK on the panel unless they turned that off. If they say no, stop and ask what they want instead.",
+    "7. Relative paths are inside the project. If a tool fails, read the error and try a different way, two or three times at most, then explain.",
+    "8. A question about the code needs reading, not changing: answer it from what the files say, with file names and line numbers.",
+    "",
+    "Be direct and specific. No filler.",
+  ].join("\n");
+}
+
+// The project as the next request sees it: the time, the branch, what has changed.
+async function codeContextLine(c) {
+  const g = await fileTools.gitStatus(c.root).catch(() => null);
+  const when = new Date().toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const bits = ["It is " + when + ".", "Project " + c.name + " at " + c.root + "."];
+  if (g && g.git) bits.push("Git: branch " + (g.branch || "(none)") + ", " + g.changes.length + " uncommitted change" + (g.changes.length === 1 ? "" : "s") + (g.ahead ? ", " + g.ahead + " commits not pushed" : "") + ".");
+  else bits.push("Not a git repo.");
+  return "[" + bits.join(" ") + "]";
+}
+
+// Old tool results are the bulk of a coding conversation: when it nears the
+// model's window, the oldest are cut to a line (the newest stay whole).
+function fitContext(conv, window, systemChars) {
+  if (!window) return;
+  const budget = window * 3.4 * 0.72 - systemChars - 6000;
+  const size = () => JSON.stringify(conv.messages).length;
+  if (size() <= budget) return;
+  for (const m of conv.messages.slice(0, -2)) {
+    if (m.role !== "user" || !Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (b.type !== "tool_result" || typeof b.content !== "string" || b.content.length < 400) continue;
+      b.content = b.content.slice(0, 300) + "\n… (older result shortened to save room; run the tool again if you need it)";
+      if (size() <= budget) return;
+    }
+  }
+  // Still too big: the oldest exchanges go, whole.
+  while (conv.messages.length > 6 && size() > budget) conv.messages.splice(0, 2);
+  // Start on something the user said, never part-way through a tool exchange
+  // (a result whose call is gone is refused by Claude).
+  const said = (m) => m.role === "user" && (typeof m.content === "string" || m.content.some((b) => b.type === "text"));
+  while (conv.messages.length > 1 && !said(conv.messages[0])) conv.messages.shift();
 }
 
 const ago = (t) => {
@@ -2996,11 +3216,18 @@ async function handleTurn(req, res) {
       } else {
         const text = String(body.text || "").trim();
         if (!text) throw new UserFacing("I didn't catch that.");
-        // A chat just picked in the Chat app starts afresh in that chat.
-        // (Typing into the chat this conversation is already in just carries on.)
-        if (chatPick.id && conv && conv.chatId === chatPick.id) chatPick.id = null;
-        if (chatPick.id && Date.now() - chatPick.at < 10 * 60 * 1000) conv = null;
-        if (!conv || conv.pending) conv = newConv();
+        // From Jarvis Code: a conversation in that project.
+        const code = body.code && body.code.root ? await codeProject(body.code.root) : null;
+        if (code && !code.ok) throw new UserFacing(code.error);
+        if (code) {
+          if (!conv || conv.pending || !conv.code || conv.code.root !== code.root) conv = newConv();
+        } else {
+          // A chat just picked in the Chat app starts afresh in that chat.
+          // (Typing into the chat this conversation is already in just carries on.)
+          if (chatPick.id && conv && conv.chatId === chatPick.id) chatPick.id = null;
+          if (chatPick.id && Date.now() - chatPick.at < 10 * 60 * 1000) conv = null;
+          if (!conv || conv.pending || conv.code) conv = newConv();
+        }
         // The big model is busy: anything asked now would queue behind it (or
         // swap it out), so answer at once instead, without a model.
         if (think.job) {
@@ -3014,12 +3241,20 @@ async function handleTurn(req, res) {
           return;
         }
         // A provider switch mid-conversation is fine, but pick once per turn.
-        conv.provider = await chooseProvider();
+        if (code) {
+          // The Code app picks the model: "claude", a local model, or "" for the everyday one.
+          const want = String(body.model || "");
+          conv.code = { root: code.root, name: code.name };
+          conv.chatId = code.chatId;
+          if (!conv.fsCwd || !conv.fsCwd.toLowerCase().startsWith(code.root.toLowerCase())) conv.fsCwd = code.root;
+          conv.provider = want === "claude" && claudeClient() ? "claude" : want === "claude" ? await chooseProvider() : "local";
+          conv.localModel = want && want !== "claude" && /^[\w.\-]{1,64}$/.test(want) ? want : null;
+        } else conv.provider = await chooseProvider();
         conv.log = { heard: text, reply: "", tools: [], cards: [], at: Date.now(), usage: freshUsage() };
         conv.searches = 0;
         conv.nudged = null; conv.nudge = null;
         // A new conversation: does it continue a chat? Its history comes first.
-        if (!conv.chatId && !conv.messages.length) {
+        if (!code && !conv.chatId && !conv.messages.length) {
           const r = routeChat(text);
           if (r) {
             resumeInto(conv, r.chat);
@@ -3029,8 +3264,8 @@ async function handleTurn(req, res) {
         }
         // The Chat app shows the question at once, with a "thinking" bubble.
         broadcast({ type: "chat-pending", heard: text, at: Date.now(), chatId: conv.chatId || null });
-        conv.messages.push({ role: "user", content: [{ type: "text", text: contextLine(body.context) + "\n" + text }] });
-        emit({ type: "start", conv: conv.id, provider: conv.provider, model: conv.provider === "claude" ? settings.claudeModel : localModelNow() });
+        conv.messages.push({ role: "user", content: [{ type: "text", text: (code ? await codeContextLine(conv.code) : contextLine(body.context)) + "\n" + text }] });
+        emit({ type: "start", conv: conv.id, provider: conv.provider, model: conv.provider === "claude" ? settings.claudeModel : localModelFor(conv), chat: conv.chatId || null });
       }
       conv.at = Date.now();
       const outcome = await runLoop(conv, emit, ctl.signal);
@@ -3224,7 +3459,77 @@ async function handle(req, res, urlPath) {
     });
   }
   if (sub === "permissions" && req.method === "GET") {
-    return json(res, 200, { ok: true, pending: [...perms].map(([id, p]) => ({ id, ...p.req, detail: String(p.req.detail || "").slice(0, 1500) })) });
+    return json(res, 200, { ok: true, pending: [...perms].map(([id, p]) => ({ id, ...p.req, detail: String(p.req.detail || "").slice(0, 1500), source: p.conv && p.conv.code ? "code" : "jarvis" })) });
+  }
+
+  // ---- Jarvis Code: you browsing a project (the model goes through the tools) ----
+  if (sub.startsWith("code/")) {
+    const q = new URL(req.url, "http://x").searchParams;
+    const what = sub.slice(5);
+    if (what === "projects" && req.method === "GET") {
+      // The ones you have opened, newest first, and git repos found in the
+      // usual places (Documents and one level down).
+      const s = codeStore();
+      const recent = Object.values(s.projects).filter((p) => fs.existsSync(p.root)).sort((a, b) => b.at - a.at).slice(0, 20);
+      const found = [];
+      const roots = [path.join(os.homedir(), "Documents"), path.join(os.homedir(), "source", "repos"), path.join(os.homedir(), "Desktop")];
+      for (const r of roots) {
+        let ents = [];
+        // (Hidden folders are some other program's, like KiCad's .history.)
+        try { ents = fs.readdirSync(r, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith(".")); } catch (e) { continue; }
+        for (const e of ents.slice(0, 200)) {
+          const p = path.join(r, e.name);
+          if (fs.existsSync(path.join(p, ".git"))) { found.push({ root: p, name: e.name }); continue; }
+          let sub2 = [];
+          try { sub2 = fs.readdirSync(p, { withFileTypes: true }).filter((x) => x.isDirectory() && !x.name.startsWith(".")); } catch (err) { continue; }
+          for (const x of sub2.slice(0, 200)) if (fs.existsSync(path.join(p, x.name, ".git"))) found.push({ root: path.join(p, x.name), name: x.name });
+        }
+      }
+      const seen = new Set(recent.map((p) => p.root.toLowerCase()));
+      return json(res, 200, { ok: true, recent, found: found.filter((p) => !seen.has(p.root.toLowerCase())).slice(0, 60), home: os.homedir() });
+    }
+    if (what === "open" && req.method === "POST") {
+      return H.readJsonBody(req, res, async (b) => {
+        const p = await codeProject(String((b && b.root) || ""));
+        if (!p.ok) return json(res, 400, p);
+        const g = await fileTools.gitStatus(p.root).catch(() => ({ ok: false }));
+        return json(res, 200, { ok: true, project: p, git: g });
+      });
+    }
+    if (what === "new" && req.method === "POST") {
+      // A new project: a folder with a git repo and a README, made by you.
+      return H.readJsonBody(req, res, async (b) => {
+        const name = String((b && b.name) || "").trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").slice(0, 80);
+        if (!name) return json(res, 400, { ok: false, error: "Give it a name." });
+        const parent = fileTools.resolve(String((b && b.parent) || path.join(os.homedir(), "Documents")), null);
+        const root = path.join(parent, name);
+        if (fs.existsSync(root)) return json(res, 400, { ok: false, error: root + " already exists." });
+        const g = fileTools.guard(root, true);
+        if (g) return json(res, 400, { ok: false, error: g });
+        fs.mkdirSync(root, { recursive: true });
+        await fileTools.run("git", ["init", "-b", "main"], root, 20000);
+        fs.writeFileSync(path.join(root, "README.md"), "# " + name + "\n");
+        const p = await codeProject(root);
+        return json(res, 200, { ok: true, project: p, git: await fileTools.gitStatus(root) });
+      });
+    }
+    if (what === "ls" && req.method === "GET") return json(res, 200, await fileTools.listDir(fileTools.resolve(q.get("path") || "", null)));
+    if (what === "file" && req.method === "GET") return json(res, 200, await fileTools.readText(fileTools.resolve(q.get("path") || "", null), 1024 * 1024));
+    if (what === "status" && req.method === "GET") return json(res, 200, await fileTools.gitStatus(fileTools.resolve(q.get("root") || "", null)));
+    if (what === "diff" && req.method === "GET") return json(res, 200, await fileTools.gitDiff(fileTools.resolve(q.get("root") || "", null), q.get("path") || ""));
+    if (what === "commit" && req.method === "POST") {
+      // You committing from the Changes tab: everything, with your message.
+      return H.readJsonBody(req, res, async (b) => {
+        const root = fileTools.resolve(String((b && b.root) || ""), null);
+        const msg = String((b && b.message) || "").trim().slice(0, 2000);
+        if (!msg) return json(res, 400, { ok: false, error: "Write a commit message." });
+        const add = await fileTools.run("git", ["add", "-A"], root, 60000);
+        if (!add.ok) return json(res, 500, { ok: false, error: add.err.trim() });
+        const c = await fileTools.run("git", ["commit", "-m", msg], root, 60000);
+        return json(res, c.ok ? 200 : 500, { ok: c.ok, output: (c.out + c.err).trim().slice(0, 2000), git: await fileTools.gitStatus(root) });
+      });
+    }
+    return json(res, 404, { ok: false, error: "no such code route" });
   }
   // The latest exchanges, whichever chat they are in (older panels ask this).
   if (sub === "chat" && req.method === "GET") return json(res, 200, { ok: true, entries: chats.latest(60) });
@@ -3350,10 +3655,12 @@ function init(host) {
   if (settings.wake) setTimeout(voiceStart, 1500);
   // whisper-server is a child of this process; Windows does not take children
   // down with their parent, so stop it on the way out.
-  process.on("exit", () => { whisperStop(); kokoroStop(); });
-  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { whisperStop(); kokoroStop(); process.exit(0); });
+  process.on("exit", () => { whisperStop(); kokoroStop(); qwenStop(); });
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { whisperStop(); kokoroStop(); qwenStop(); process.exit(0); });
   // Load the voice now, so the first answer is not the one that waits for it.
-  if (ttsEngine() === "kokoro") setTimeout(kokoroStart, 2500);
+  if (settings.tts !== "windows" && kokoroPaths()) setTimeout(kokoroStart, 2500);
+  // The cloned voice takes half a minute: start it now, behind everything else.
+  if (settings.tts === "qwen") setTimeout(() => { if (!(game.on && settings.qwenGameFree)) qwenStart(); }, 6000);
   // Keep the local model's status fresh for the panel without a request.
   // When the router comes up (now, or later), the everyday model goes in.
   let wasUp = false;
@@ -3452,7 +3759,7 @@ let turnsActive = 0;
 module.exports = {
   init, handle,
   STATE_FILES: ["jarvis.json", "jarvis-memory.json", "jarvis-history.json", "jarvis-chat.json", "jarvis-chat.imported.json",
-    "jarvis-memory-guide.json", "jarvis-memory-guide.md"].concat(govee.STATE_FILES),
+    "jarvis-memory-guide.json", "jarvis-memory-guide.md", "jarvis-code.json"].concat(govee.STATE_FILES),
   // For test harnesses: run one server-side tool as a model would.
   runServerTool, TOOLS,
 };

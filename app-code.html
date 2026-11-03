@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en" data-surface="trim">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Jarvis Code</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/ui.css" />
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--t-bg, #000); color: var(--t-text, #f2f2f7); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+    #wrap { height: 100%; display: flex; flex-direction: column; }
+    .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+    /* ---- Header and tabs ---- */
+    #head { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--t-bg-2, #101014); border-bottom: 1px solid var(--t-accent-line, rgba(168,92,214,.35)); user-select: none; }
+    .orb { width: 22px; height: 22px; border-radius: 6px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font: 700 12px ui-monospace, Consolas, monospace; color: #fff;
+      background: radial-gradient(circle at 35% 30%, #b9a6ff 0, var(--t-accent, #a85cd6) 55%, #26124a 100%); box-shadow: 0 0 12px var(--t-accent-soft, rgba(168,92,214,.4)); }
+    .ht { flex: 1; min-width: 0; }
+    #title { font-size: 15px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #sub { font-size: 11px; color: var(--t-sub, #a6a6b3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+    #head .btn { flex-shrink: 0; }
+    .tabs { flex-shrink: 0; display: flex; gap: 4px; padding: 6px 10px; background: var(--t-bg-2, #101014); border-bottom: 1px solid var(--t-line, #2c2c33); }
+    .tabs[hidden] { display: none; }
+    .tabs button { flex: 1; min-height: 34px; border: 0; border-radius: 10px; background: transparent; color: var(--t-sub, #a6a6b3); font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; }
+    .tabs button.on { background: var(--t-accent-soft, rgba(168,92,214,.25)); color: var(--t-text, #fff); }
+    .tabs .n { font-size: 10.5px; margin-left: 5px; padding: 0 6px; border-radius: 8px; background: rgba(255,179,92,.2); color: #ffb35c; }
+
+    .view { flex: 1; min-height: 0; overflow-y: auto; display: none; flex-direction: column; }
+    .view.show { display: flex; }
+    .view::-webkit-scrollbar { width: 4px; } .view::-webkit-scrollbar-thumb { background: var(--t-accent-dim, #3a3a42); border-radius: 2px; }
+    .pad { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .note { font-size: 12px; color: var(--t-muted, #7a7a85); text-align: center; padding: 14px 6px; }
+    .sec-h { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--t-sub, #a6a6b3); margin: 4px 0 -4px; }
+    .row { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 12px; background: var(--t-surface, #16161a); border: 1px solid var(--t-line, #2c2c33); cursor: pointer; }
+    .row .t { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row .s { font-size: 11.5px; color: var(--t-sub, #a6a6b3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row .m { font-size: 10.5px; color: var(--t-muted, #7a7a85); flex-shrink: 0; text-align: right; }
+    .grow { flex: 1; min-width: 0; }
+    .line { display: flex; gap: 8px; }
+    .line .ui-input { flex: 1; min-width: 0; }
+
+    /* ---- The conversation ---- */
+    #meter { flex-shrink: 0; padding: 6px 12px 7px; border-bottom: 1px solid var(--t-line, #2c2c33); background: var(--t-bg-2, #101014); font-size: 11px; color: var(--t-sub, #a6a6b3); font-variant-numeric: tabular-nums; }
+    #meter[hidden] { display: none; }
+    #meter .bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; margin: 4px 0 3px; }
+    #meter .bar i { display: block; height: 100%; background: linear-gradient(90deg, #5ab0ff, var(--t-accent, #a85cd6)); transition: width .3s; }
+    #meter .bar i.warm { background: #ffb35c; } #meter .bar i.hot { background: #ff4d6d; }
+    #meter .top { display: flex; gap: 8px; } #meter .top b { margin-left: auto; color: var(--t-text, #fff); font-weight: 650; }
+    #log { padding: 12px; gap: 10px; }
+    .day { align-self: center; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--t-muted, #7a7a85); margin: 4px 0; }
+    .me { align-self: flex-end; max-width: 88%; background: var(--t-accent, #a85cd6); color: var(--t-accent-ink, #fff); padding: 9px 12px; border-radius: 16px 16px 5px 16px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-wrap: break-word; user-select: text; }
+    .him { align-self: stretch; background: var(--t-surface, #16161a); border: 1px solid var(--t-line, #2c2c33); border-radius: 14px; padding: 10px 12px; font-size: 14px; line-height: 1.5; user-select: text; overflow-wrap: anywhere; }
+    .him:empty { display: none; }
+    .him p { margin: 0 0 8px; } .him p:last-child { margin-bottom: 0; }
+    .him ul, .him ol { margin: 4px 0 8px; padding-left: 22px; }
+    .him p.h { font-weight: 750; margin-top: 10px; }
+    .him code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: rgba(255,255,255,.07); padding: 0 4px; border-radius: 4px; }
+    .him pre { margin: 6px 0 10px; padding: 9px 11px; background: rgba(0,0,0,.35); border: 1px solid var(--t-line, #2c2c33); border-radius: 10px; overflow-x: auto; }
+    .him pre code { background: none; padding: 0; font-size: 12px; white-space: pre; }
+    .him .tbl { overflow-x: auto; margin: 4px 0 8px; } .him table { border-collapse: collapse; font-size: 12.5px; }
+    .him th, .him td { border: 1px solid var(--t-line, #2c2c33); padding: 3px 7px; text-align: left; }
+    .meta { align-self: flex-start; font-size: 10.5px; color: var(--t-muted, #7a7a85); margin: -4px 0 0 4px; font-variant-numeric: tabular-nums; }
+    .typing { display: inline-flex; gap: 4px; padding: 3px 0; }
+    .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--t-sub, #a6a6b3); animation: blink 1.2s infinite ease-in-out; }
+    .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
+    @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+    .err { color: #ff8f8f; font-size: 13px; }
+    #empty { margin: auto; text-align: center; color: var(--t-sub, #a6a6b3); font-size: 13.5px; line-height: 1.6; padding: 30px 20px; }
+    #empty b { display: block; color: var(--t-text, #fff); font-size: 16px; margin: 10px 0 4px; }
+    .tries { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 12px; }
+
+    /* Steps: each tool call, what it did, what came back */
+    .steps { align-self: stretch; display: flex; flex-direction: column; gap: 4px; }
+    .step { border-radius: 10px; background: rgba(255,255,255,.035); border: 1px solid var(--t-line, #2c2c33); font-size: 12.5px; }
+    .step .hd { display: flex; gap: 8px; align-items: center; padding: 6px 10px; cursor: pointer; }
+    .step .ic { width: 16px; text-align: center; flex-shrink: 0; }
+    .step .lb { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .step .st { font-size: 10.5px; color: var(--t-muted, #7a7a85); flex-shrink: 0; }
+    .step.run .st { color: #5ab0ff; } .step.bad .st { color: #ff8f8f; } .step.ok .st { color: #46d18a; }
+    .step .bd { display: none; border-top: 1px solid var(--t-line, #2c2c33); }
+    .step.open .bd { display: block; }
+    .step pre { margin: 0; padding: 8px 10px; font: 11.5px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; color: var(--t-sub, #c9c9d3); }
+    .diff .a { color: #6fe39a; } .diff .d { color: #ff8f8f; } .diff .h { color: #5ab0ff; }
+    .ask { margin: 4px 0 2px; border-radius: 12px; padding: 10px 12px; background: rgba(255,179,92,.08); border: 1px solid rgba(255,179,92,.45); }
+    .ask.read { background: rgba(90,176,255,.08); border-color: rgba(90,176,255,.35); }
+    .ask .k { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--t-sub, #a6a6b3); }
+    .ask .t { font-size: 14.5px; font-weight: 700; margin-top: 2px; }
+    .ask .p { font-size: 11px; color: var(--t-sub, #a6a6b3); word-break: break-all; }
+    .ask pre { margin: 6px 0 0; max-height: 200px; overflow: auto; font: 11px/1.4 ui-monospace, Consolas, monospace; background: rgba(0,0,0,.35); border-radius: 8px; padding: 6px 8px; white-space: pre-wrap; }
+    .ask .b { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    .ask.done { opacity: .6; } .ask.done .b { display: none; }
+
+    /* ---- Composer ---- */
+    #compose { flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; padding: 8px 12px 10px; border-top: 1px solid var(--t-line, #2c2c33); background: var(--t-bg-2, #101014); }
+    #compose[hidden] { display: none; }
+    #compose .line { align-items: flex-end; }
+    #say { flex: 1; min-width: 0; min-height: 42px; max-height: 160px; resize: none; font: 14px/1.4 -apple-system, "Segoe UI", sans-serif; padding: 10px 12px; }
+    .models { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; font-size: 11px; color: var(--t-muted, #7a7a85); }
+    .chip { font-size: 11.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--t-line, #2c2c33); background: transparent; color: var(--t-sub, #a6a6b3); cursor: pointer; }
+    .chip.on { background: var(--t-accent, #a85cd6); border-color: transparent; color: var(--t-accent-ink, #fff); }
+
+    /* ---- Files ---- */
+    .crumbs { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; font-size: 12px; padding: 8px 12px; border-bottom: 1px solid var(--t-line, #2c2c33); background: var(--t-bg-2, #101014); position: sticky; top: 0; z-index: 1; }
+    .crumbs a { color: var(--t-accent, #c79bff); text-decoration: none; padding: 2px 4px; border-radius: 5px; cursor: pointer; }
+    .crumbs span { color: var(--t-muted, #7a7a85); }
+    .ent { display: flex; gap: 8px; align-items: center; padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,.04); cursor: pointer; font-size: 13.5px; }
+    .ent .i { width: 18px; text-align: center; opacity: .8; }
+    .ent .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ent .sz { font-size: 11px; color: var(--t-muted, #7a7a85); font-variant-numeric: tabular-nums; }
+    .ent.skip { opacity: .45; }
+    .viewer { display: flex; font: 12px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; overflow: auto; user-select: text; }
+    .viewer .g { padding: 8px 8px 8px 10px; text-align: right; color: var(--t-muted, #5a5a63); user-select: none; white-space: pre; border-right: 1px solid var(--t-line, #2c2c33); flex-shrink: 0; }
+    .viewer .c { padding: 8px 12px; white-space: pre; flex: 1; }
+    .fbar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--t-line, #2c2c33); font-size: 12px; color: var(--t-sub, #a6a6b3); position: sticky; top: 0; background: var(--t-bg-2, #101014); z-index: 1; }
+
+    /* ---- Changes ---- */
+    .chg { display: flex; gap: 8px; align-items: center; padding: 7px 12px; border-bottom: 1px solid rgba(255,255,255,.04); font-size: 13px; cursor: pointer; }
+    .chg .cd { font: 700 11px ui-monospace, Consolas, monospace; width: 22px; text-align: center; border-radius: 4px; padding: 1px 0; }
+    .cd.M { color: #ffb35c; } .cd.A, .cd.U { color: #46d18a; } .cd.D { color: #ff8f8f; } .cd.R { color: #5ab0ff; }
+    .chg .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+    .chg.on { background: var(--t-accent-soft, rgba(168,92,214,.18)); }
+    pre.diffv { margin: 0; padding: 8px 12px; font: 11.5px/1.45 ui-monospace, Consolas, monospace; white-space: pre; overflow-x: auto; background: rgba(0,0,0,.3); user-select: text; }
+    .commit { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--t-line, #2c2c33); }
+    .log .lg { display: flex; gap: 8px; padding: 6px 12px; font-size: 12px; border-bottom: 1px solid rgba(255,255,255,.04); }
+    .log .lg .h { font-family: ui-monospace, Consolas, monospace; color: var(--t-accent, #c79bff); flex-shrink: 0; }
+    .log .lg .w { color: var(--t-muted, #7a7a85); flex-shrink: 0; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="head">
+      <span class="orb">&lt;/&gt;</span>
+      <div class="ht"><div id="title">Jarvis Code</div><div id="sub">pick a project</div></div>
+      <button class="btn btn--ghost btn--sm" id="b-proj">Projects</button>
+    </div>
+    <div class="tabs" id="tabs" hidden>
+      <button data-v="chat" class="on">Chat</button>
+      <button data-v="files">Files</button>
+      <button data-v="changes">Changes<span class="n" id="nchg" hidden></span></button>
+    </div>
+    <div id="meter" hidden></div>
+    <div id="v-projects" class="view show"><div class="pad" id="projects"></div></div>
+    <div id="v-chat" class="view"><div class="pad" id="log"></div></div>
+    <div id="v-files" class="view"></div>
+    <div id="v-changes" class="view"></div>
+    <form id="compose" hidden>
+      <div class="models" id="models"></div>
+      <div class="line">
+        <textarea class="ui-input" id="say" rows="1" placeholder="Ask Jarvis to read, explain, fix or build something…"></textarea>
+        <button class="btn btn--primary btn--sm" id="send" type="submit">Send</button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const API = "/api/jarvis/";
+    const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+    const kfmt = (n) => { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n); };
+    const size = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB" : (n / 1048576).toFixed(1) + " MB";
+    const clock = (t) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const base = (p) => String(p || "").split(/[\\/]/).filter(Boolean).pop() || p;
+    const store = { get(k, d) { try { const v = localStorage.getItem("jcode." + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem("jcode." + k, JSON.stringify(v)); } catch (e) {} } };
+    const getJ = (p) => fetch(API + p).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
+    const postJ = (p, b) => fetch(API + p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b || {}) }).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
+
+    // ---- Markdown, for his answers -------------------------------------------------
+    const inline = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/(^|[\s(])\*([^*\s][^*]*)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>");
+    function md(text) {
+      const out = [];
+      let list = null, code = null, table = null;
+      const endList = () => { if (list) { out.push("</" + list + ">"); list = null; } };
+      const endTable = () => { if (table) { out.push(table.join("") + "</tbody></table></div>"); table = null; } };
+      for (const raw of String(text || "").split(/\r?\n/)) {
+        if (code) { if (/^\s*```/.test(raw)) { out.push("<pre><code>" + esc(code.join("\n")) + "</code></pre>"); code = null; } else code.push(raw); continue; }
+        const t = raw.trim();
+        if (/^```/.test(t)) { endList(); endTable(); code = []; continue; }
+        if (/^\|.*\|$/.test(t)) {
+          endList();
+          const cells = t.slice(1, -1).split("|").map((c) => c.trim());
+          if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue;
+          if (!table) table = ['<div class="tbl"><table><thead><tr>' + cells.map((c) => "<th>" + inline(c) + "</th>").join("") + "</tr></thead><tbody>"];
+          else table.push("<tr>" + cells.map((c) => "<td>" + inline(c) + "</td>").join("") + "</tr>");
+          continue;
+        }
+        endTable();
+        const h = t.match(/^#{1,6}\s+(.*)$/);
+        if (h) { endList(); out.push('<p class="h">' + inline(h[1]) + "</p>"); continue; }
+        const ul = t.match(/^[-*•]\s+(.*)$/), ol = t.match(/^\d+[.)]\s+(.*)$/);
+        if (ul || ol) { const k = ul ? "ul" : "ol"; if (list !== k) { endList(); list = k; out.push("<" + k + ">"); } out.push("<li>" + inline((ul || ol)[1]) + "</li>"); continue; }
+        endList();
+        if (t) out.push("<p>" + inline(t) + "</p>");
+      }
+      if (code) out.push("<pre><code>" + esc(code.join("\n")) + "</code></pre>");
+      endList(); endTable();
+      return out.join("");
+    }
+    function diffHtml(text) {
+      return String(text || "").split("\n").map((l) =>
+        /^\+(?!\+\+)/.test(l) ? '<span class="a">' + esc(l) + "</span>" : /^-(?!--)/.test(l) ? '<span class="d">' + esc(l) + "</span>" : /^@@/.test(l) ? '<span class="h">' + esc(l) + "</span>" : esc(l)).join("\n");
+    }
+
+    // ---- State -----------------------------------------------------------------------
+    let project = null;          // { root, name, chatId }
+    let git = null;              // gitStatus
+    let view = "projects";
+    let conv = null, convAt = 0, busy = null;   // busy = AbortController of the running turn
+    let model = store.get("model", "");
+
+    function setView(v) {
+      view = v;
+      for (const n of ["projects", "chat", "files", "changes"]) $("#v-" + n).classList.toggle("show", n === v);
+      document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.v === v));
+      $("#tabs").hidden = !project || v === "projects";
+      $("#compose").hidden = v !== "chat";
+      $("#meter").hidden = v !== "chat" || !liveMeter;
+      $("#b-proj").textContent = v === "projects" && project ? "Back" : "Projects";
+      if (v === "files" && !$("#v-files").firstChild) openDir(project.root);
+      if (v === "changes") loadChanges();
+      if (v === "projects") loadProjects();
+      head();
+    }
+    function head() {
+      if (!project || view === "projects") { $("#title").textContent = "Jarvis Code"; $("#sub").textContent = project ? "open another project, or start a new one" : "pick a project"; return; }
+      $("#title").textContent = project.name;
+      $("#sub").textContent = (git && git.git ? (git.branch || "no branch") + " · " + (git.changes.length ? git.changes.length + " changed" : "clean") + (git.ahead ? " · " + git.ahead + " to push" : "") : "not a git repo") + " · " + project.root;
+      const n = git && git.git ? git.changes.length : 0;
+      $("#nchg").hidden = !n; $("#nchg").textContent = n;
+    }
+    async function refreshGit() {
+      if (!project) return;
+      git = await getJ("code/status?root=" + encodeURIComponent(project.root));
+      head();
+    }
+
+    // ---- Projects --------------------------------------------------------------------
+    async function loadProjects() {
+      const box = $("#projects");
+      const r = await getJ("code/projects");
+      box.innerHTML = "";
+      const open = box.appendChild(el("div", "line"));
+      const inp = open.appendChild(el("input", "ui-input"));
+      inp.placeholder = "Open a folder: C:\\Users\\…\\project"; kb(inp);
+      const ob = open.appendChild(el("button", "btn btn--ghost btn--sm", "Open"));
+      const go = () => { if (inp.value.trim()) openProject(inp.value.trim()); };
+      ob.addEventListener("click", go);
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+      const mk = box.appendChild(el("div", "line"));
+      const nn = mk.appendChild(el("input", "ui-input"));
+      nn.placeholder = "New project name (made in Documents, with git)"; kb(nn);
+      const nb = mk.appendChild(el("button", "btn btn--ghost btn--sm", "Create"));
+      nb.addEventListener("click", async () => {
+        if (!nn.value.trim()) return;
+        const p = await postJ("code/new", { name: nn.value.trim() });
+        if (!p.ok) { alertLine(box, p.error); return; }
+        enterProject(p.project, p.git);
+      });
+      const list = (title, items, sub) => {
+        if (!items.length) return;
+        box.appendChild(el("div", "sec-h", title));
+        for (const p of items) {
+          const row = el("div", "row", '<div class="grow"><div class="t">' + esc(p.name) + '</div><div class="s">' + esc(p.root) + "</div></div>" + (sub ? '<div class="m">' + sub(p) + "</div>" : ""));
+          row.addEventListener("click", () => openProject(p.root));
+          box.appendChild(row);
+        }
+      };
+      list("Recent", r.recent || [], (p) => p.at ? new Date(p.at).toLocaleDateString([], { month: "short", day: "numeric" }) : "");
+      list("Git repos on this PC", r.found || [], null);
+      if (!(r.recent || []).length && !(r.found || []).length) box.appendChild(el("div", "note", "No projects found in Documents. Open a folder above, or create one."));
+    }
+    function alertLine(box, msg) { const n = el("div", "err", esc(msg)); box.prepend(n); setTimeout(() => n.remove(), 6000); }
+    async function openProject(root) {
+      const r = await postJ("code/open", { root });
+      if (!r.ok) { alertLine($("#projects"), r.error || "Couldn't open it."); return; }
+      enterProject(r.project, r.git);
+    }
+    async function enterProject(p, g) {
+      if (busy) { busy.abort(); busy = null; }
+      project = p; git = g; conv = null;
+      store.set("project", p.root);
+      $("#v-files").innerHTML = ""; $("#v-changes").innerHTML = "";
+      setView("chat");
+      await loadHistory();
+    }
+
+    // ---- The conversation ----------------------------------------------------------
+    const log = $("#log");
+    const atBottom = () => { const v = $("#v-chat"); return v.scrollHeight - v.scrollTop - v.clientHeight < 120; };
+    const toBottom = () => { const v = $("#v-chat"); v.scrollTop = v.scrollHeight; };
+    async function loadHistory() {
+      log.innerHTML = "";
+      const r = project.chatId ? await getJ("chats/" + project.chatId) : null;
+      const turns = (r && r.ok && r.chat.turns) || [];
+      if (!turns.length) { emptyState(); return; }
+      let day = "";
+      for (const t of turns.slice(-40)) {
+        const d = new Date(t.at).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+        if (d !== day) { day = d; log.appendChild(el("div", "day", esc(d))); }
+        log.appendChild(el("div", "me", esc(t.heard)));
+        if ((t.tools || []).length) log.appendChild(el("div", "meta", "used " + esc([...new Set(t.tools)].join(", "))));
+        log.appendChild(el("div", "him", md(t.reply)));
+        log.appendChild(el("div", "meta", metaLine(t)));
+      }
+      toBottom();
+    }
+    function metaLine(t) {
+      const u = t.usage;
+      return clock(t.at) + (t.model ? " · " + esc(t.model) : "") + (u ? " · " + kfmt(u.in) + " in · " + kfmt(u.out) + " out · " + u.requests + (u.requests === 1 ? " step" : " steps") + (u.toolCalls ? " · " + u.toolCalls + " tools" : "") + (u.ms ? " · " + (u.ms / 1000).toFixed(1) + " s" : "") : "");
+    }
+    function emptyState() {
+      const e = el("div", null, '<div id="empty"><span class="orb" style="display:inline-flex;width:40px;height:40px;font-size:16px">&lt;/&gt;</span><b>' + esc(project.name) + "</b>Ask Jarvis about this project, or to change it. He reads before he edits, and every change waits for your OK.<div class=\"tries\"></div></div>");
+      for (const s of ["Give me an overview of this project", "What changed since the last commit?", "Find where the settings are saved", "Explain the main file"]) {
+        const b = el("button", "chip", esc(s));
+        b.addEventListener("click", () => send(s));
+        e.querySelector(".tries").appendChild(b);
+      }
+      log.appendChild(e);
+    }
+
+    // One turn, streamed: his words, every step, the approvals, the meter.
+    const LABEL = {
+      files: (a) => ({ list: "List", tree: "Tree of", read: "Read", find: "Find", info: "Info", write: "Write", append: "Append to", edit: "Edit", mkdir: "New folder", move: "Move", copy: "Copy", delete: "Delete", open: "Open" }[a.action] || a.action) + " " +
+        (a.action === "find" ? (a.text ? "\"" + a.text + "\"" : a.name || "") + " in " + base(a.path || ".") : base(a.path || ".")) + (a.action === "read" && a.from ? " · from line " + a.from : ""),
+      repo: (a) => a.action === "git" ? "git " + (a.args || "") : a.action === "overview" ? "Overview of " + base(a.path || project.root) : a.action === "create" ? "New repo " + (a.name || base(a.path)) : "Publish " + (a.name || ""),
+      web_search: (a) => "Search the web: " + (a.query || ""),
+      read_page: (a) => "Read " + (a.url || ""),
+    };
+    const ICON = { files: "📄", repo: "⎇", web_search: "🔎", read_page: "🌐" };
+    function stepDetail(name, a) {
+      if (name === "files" && a.action === "edit") return '<pre class="diff">' + diffHtml(String(a.find || "").split("\n").map((l) => "-" + l).join("\n") + "\n" + String(a.replace || "").split("\n").map((l) => "+" + l).join("\n")) + "</pre>";
+      if (name === "files" && (a.action === "write" || a.action === "append")) return "<pre>" + esc(String(a.content || "").slice(0, 6000)) + "</pre>";
+      return "";
+    }
+
+    let liveMeter = null;
+    function drawMeter(m) {
+      liveMeter = m;
+      const box = $("#meter");
+      box.hidden = !m || view !== "chat";
+      if (!m) return;
+      const pct = m.window ? Math.min(100, Math.round((m.ctx / m.window) * 100)) : null;
+      const now = m.stage === "reading" ? "reading the prompt" : m.stage === "writing" ? "writing · " + m.tps + " tok/s" : m.stage === "tool" ? "using tools" : m.stage === "step" ? "step " + m.step + " done" : "done";
+      box.innerHTML = '<div class="top"><span>' + esc(now) + " · " + kfmt(m.turnIn) + " in · " + kfmt(m.turnOut) + " out · " + m.toolCalls + " tools · " + (m.elapsed / 1000).toFixed(1) + " s</span><b>" + (m.est ? "~" : "") + kfmt(m.ctx) + (m.window ? " / " + kfmt(m.window) + " · " + pct + "%" : "") + "</b></div>" +
+        (pct != null ? '<div class="bar"><i class="' + (pct >= 90 ? "hot" : pct >= 70 ? "warm" : "") + '" style="width:' + Math.max(1, pct) + '%"></i></div>' : "");
+    }
+
+    async function send(text) {
+      text = String(text || "").trim();
+      if (!text || !project) return;
+      if (busy) return;
+      const empty = document.getElementById("empty");
+      if (empty) empty.parentNode.remove();
+      const stick = true;
+      log.appendChild(el("div", "me", esc(text)));
+      const steps = log.appendChild(el("div", "steps"));
+      const him = log.appendChild(el("div", "him", '<span class="typing"><i></i><i></i><i></i></span>'));
+      const meta = log.appendChild(el("div", "meta", ""));
+      toBottom();
+      let reply = "", status = "", failed = null, used = null, mdl = null;
+      const rows = new Map();
+      const ctl = new AbortController();
+      busy = ctl;
+      $("#send").textContent = "Stop";
+      const keep = () => { if (atBottom() || stick) toBottom(); };
+      let drawT = 0;
+      const drawReply = () => { drawT = 0; him.innerHTML = reply ? md(reply) : '<span class="typing"><i></i><i></i><i></i></span>' + (status ? ' <span class="meta">' + esc(status) + "</span>" : ""); keep(); };
+      try {
+        const res = await fetch(API + "turn", {
+          method: "POST", headers: { "Content-Type": "application/json" }, signal: ctl.signal,
+          body: JSON.stringify({ text, conv: Date.now() - convAt < 55 * 60 * 1000 ? conv : null, code: { root: project.root }, model }),
+        });
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, i); buf = buf.slice(i + 1);
+            if (!line.trim()) continue;
+            let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
+            if (ev.type === "start") { conv = ev.conv; mdl = ev.model; }
+            else if (ev.type === "text") { reply += ev.delta; if (!drawT) drawT = requestAnimationFrame(drawReply); }
+            else if (ev.type === "status") { status = ev.text || ""; if (!reply) drawReply(); }
+            else if (ev.type === "meter") { drawMeter(ev.stage === "done" ? null : ev); if (ev.stage === "done") used = ev; }
+            else if (ev.type === "tool" && ev.status === "running") {
+              // A new step: what he is doing, in words; tap for the detail.
+              const a = ev.input || {};
+              const lab = (LABEL[ev.name] || ((x) => ev.name + " " + JSON.stringify(x).slice(0, 80)))(a);
+              const row = el("div", "step run", '<div class="hd"><span class="ic">' + (ICON[ev.name] || "•") + '</span><span class="lb">' + esc(lab) + '</span><span class="st">working…</span></div><div class="bd">' + stepDetail(ev.name, a) + "</div>");
+              row.querySelector(".hd").addEventListener("click", () => row.classList.toggle("open"));
+              if (ev.name === "files" && (a.action === "edit" || a.action === "write")) row.classList.add("open");
+              steps.appendChild(row);
+              rows.set(ev.id, row);
+              keep();
+            } else if (ev.type === "tool" && ev.status === "done") {
+              const row = rows.get(ev.id);
+              if (row) { row.classList.remove("run"); row.classList.add(ev.ok ? "ok" : "bad"); row.querySelector(".st").textContent = ev.ok ? "done" : "failed"; }
+              if (/^(write|edit|append|move|copy|delete|mkdir)$/.test(((ev.input || {}).action) || "") || ev.name === "repo") refreshGit();
+            } else if (ev.type === "tool-result") {
+              const row = rows.get(ev.id);
+              if (row && ev.text) row.querySelector(".bd").appendChild(el("pre", ev.ok ? "" : "err", esc(ev.text)));
+              if (ev.name === "files" || ev.name === "repo") refreshGit();
+            } else if (ev.type === "permission") {
+              // Asked right where the step is.
+              const box = el("div", "ask" + (ev.write ? "" : " read"), '<div class="k">' + (ev.write ? "Jarvis wants to change something" : "Jarvis wants to look") + '</div><div class="t">' + esc(ev.title) + "</div>" +
+                (ev.path ? '<div class="p">' + esc(ev.path) + "</div>" : "") + (ev.detail ? '<pre class="diff">' + diffHtml(ev.detail) + "</pre>" : "") + '<div class="b"></div>');
+              box.dataset.id = ev.id;
+              for (const [ans, t, cls] of [["allow", "Allow", "btn--primary"], ["always", "Allow for this chat", "btn--ghost"], ["deny", "No", "btn--ghost"]]) {
+                const b = el("button", "btn btn--sm " + cls, t);
+                b.type = "button";
+                b.addEventListener("click", () => { box.classList.add("done"); postJ("permission/" + ev.id, { answer: ans }); });
+                box.querySelector(".b").appendChild(b);
+              }
+              steps.appendChild(box);
+              keep();
+            } else if (ev.type === "permission-done") {
+              const box = steps.querySelector('.ask[data-id="' + ev.id + '"]');
+              if (box) { box.classList.add("done"); box.querySelector(".k").textContent = ev.allowed ? "Allowed" : ev.answer === "timeout" ? "No answer: not done" : "You said no"; }
+            } else if (ev.type === "error") { failed = ev.message; }
+          }
+        }
+      } catch (e) {
+        if (!ctl.signal.aborted) failed = "Lost the connection to Jarvis.";
+      }
+      busy = null;
+      convAt = Date.now();
+      $("#send").textContent = "Send";
+      drawMeter(null);
+      if (ctl.signal.aborted) reply += (reply ? "\n\n" : "") + "*(stopped)*";
+      him.innerHTML = reply ? md(reply) : "";
+      if (failed) him.appendChild(el("div", "err", esc(failed)));
+      meta.textContent = clock(Date.now()) + (mdl ? " · " + mdl : "") + (used ? " · " + kfmt(used.turnIn) + " in · " + kfmt(used.turnOut) + " out · " + used.step + (used.step === 1 ? " step" : " steps") + (used.toolCalls ? " · " + used.toolCalls + " tools" : "") + " · " + (used.elapsed / 1000).toFixed(1) + " s" : "");
+      refreshGit();
+      keep();
+    }
+
+    // ---- Composer: the panel lends the keyboard while a box has focus ------------------
+    const kbMsg = (on) => { try { parent.postMessage({ type: "y70:keyboard", on }, "*"); } catch (e) {} };
+    function kb(inp) { inp.addEventListener("focus", () => kbMsg(true)); inp.addEventListener("blur", () => kbMsg(false)); return inp; }
+    const say = kb($("#say"));
+    say.addEventListener("input", () => { say.style.height = "auto"; say.style.height = Math.min(160, say.scrollHeight) + "px"; });
+    say.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#compose").requestSubmit(); } });
+    $("#compose").addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (busy) { busy.abort(); return; }
+      const t = say.value.trim();
+      if (!t) return;
+      say.value = ""; say.style.height = "";
+      send(t);
+    });
+    // Which brain works on the code.
+    async function loadModels() {
+      const r = await getJ("settings");
+      const st = (r && r.status) || {};
+      const local = (st.local && st.local.models) || [];
+      const think = r && r.settings ? r.settings.thinkModel : "";
+      const opts = [["", "Everyday" + (r && r.settings ? " (" + r.settings.localModel + ")" : "")]]
+        .concat(local.filter((m) => m.id !== think && m.served !== false && (!r.settings || m.id !== r.settings.localModel)).map((m) => [m.id, m.id]))
+        .concat(st.hasKey ? [["claude", "Claude (" + ((r.settings && r.settings.claudeModel) || "").replace(/^claude-/, "") + ")"]] : []);
+      if (!opts.some((o) => o[0] === model)) model = "";
+      const box = $("#models");
+      box.innerHTML = "<span>Model:</span>";
+      for (const [id, label] of opts) {
+        const b = el("button", "chip" + (id === model ? " on" : ""), esc(label));
+        b.type = "button";
+        b.addEventListener("click", () => { model = id; store.set("model", id); loadModels(); });
+        box.appendChild(b);
+      }
+    }
+
+    // ---- Files -------------------------------------------------------------------------
+    async function openDir(p) {
+      const box = $("#v-files");
+      const r = await getJ("code/ls?path=" + encodeURIComponent(p));
+      box.innerHTML = "";
+      box.appendChild(crumbs(p));
+      if (!r.ok) { box.appendChild(el("div", "note", esc(r.error))); return; }
+      if (!r.entries.length) box.appendChild(el("div", "note", "Empty folder."));
+      for (const e of r.entries) {
+        const full = r.path.replace(/[\\/]+$/, "") + "\\" + e.name;
+        const row = el("div", "ent" + (e.skip ? " skip" : ""), '<span class="i">' + (e.dir ? "📁" : "📄") + '</span><span class="nm">' + esc(e.name) + '</span><span class="sz">' + (e.dir ? "" : size(e.size)) + "</span>");
+        row.addEventListener("click", () => (e.dir ? openDir(full) : openFile(full)));
+        box.appendChild(row);
+      }
+      box.scrollTop = 0;
+    }
+    function crumbs(p) {
+      const c = el("div", "crumbs");
+      const rootLen = project.root.replace(/[\\/]+$/, "").length;
+      const parts = [];
+      let acc = project.root.replace(/[\\/]+$/, "");
+      parts.push([project.name, acc]);
+      for (const seg of p.slice(rootLen).split(/[\\/]/).filter(Boolean)) { acc += "\\" + seg; parts.push([seg, acc]); }
+      parts.forEach(([name, at], i) => {
+        if (i) c.appendChild(el("span", null, "/"));
+        const a = el("a", null, esc(name));
+        a.addEventListener("click", () => openDir(at));
+        c.appendChild(a);
+      });
+      return c;
+    }
+    async function openFile(p) {
+      const box = $("#v-files");
+      const r = await getJ("code/file?path=" + encodeURIComponent(p));
+      box.innerHTML = "";
+      const dir = p.replace(/[\\/][^\\/]+$/, "");
+      box.appendChild(crumbs(dir));
+      const bar = box.appendChild(el("div", "fbar", '<b class="grow">' + esc(base(p)) + "</b>" + (r.size != null ? "<span>" + size(r.size) + "</span>" : "")));
+      const askB = el("button", "btn btn--ghost btn--sm", "Ask about it");
+      askB.addEventListener("click", () => { setView("chat"); say.value = "About " + p.slice(project.root.length).replace(/^[\\/]/, "") + ": "; say.focus(); });
+      bar.appendChild(askB);
+      if (!r.ok) { box.appendChild(el("div", "note", esc(r.error))); return; }
+      if (r.binary || r.tooBig) { box.appendChild(el("div", "note", r.binary ? "A binary file." : "Too big to show here.")); return; }
+      const lines = r.text.split(/\r?\n/);
+      const v = el("div", "viewer");
+      v.appendChild(el("div", "g", lines.map((_, i) => i + 1).join("\n")));
+      v.appendChild(el("div", "c", esc(r.text)));
+      box.appendChild(v);
+      box.scrollTop = 0;
+    }
+
+    // ---- Changes -------------------------------------------------------------------------
+    let diffFor = null;
+    async function loadChanges() {
+      await refreshGit();
+      const box = $("#v-changes");
+      box.innerHTML = "";
+      if (!git || !git.git) {
+        box.appendChild(el("div", "note", "Not a git repo. Ask Jarvis to make it one, or say “repo create” in the chat."));
+        return;
+      }
+      const top = box.appendChild(el("div", "fbar", "<b class=\"grow\">" + esc(git.branch || "no branch") + "</b><span>" + (git.upstream ? esc(git.upstream) + (git.ahead ? " · " + git.ahead + " ahead" : "") + (git.behind ? " · " + git.behind + " behind" : "") : "no upstream") + "</span>"));
+      const rf = el("button", "btn btn--ghost btn--sm", "Refresh");
+      rf.addEventListener("click", loadChanges);
+      top.appendChild(rf);
+      if (git.changes.length) {
+        const cm = box.appendChild(el("div", "commit"));
+        const msg = kb(cm.appendChild(el("input", "ui-input")));
+        msg.placeholder = "Commit message (commits all " + git.changes.length + " changes)";
+        const row = cm.appendChild(el("div", "line"));
+        const cb = row.appendChild(el("button", "btn btn--primary btn--sm", "Commit all"));
+        const ab = row.appendChild(el("button", "btn btn--ghost btn--sm", "Ask Jarvis for a message"));
+        const out = cm.appendChild(el("div", "meta", ""));
+        cb.addEventListener("click", async () => {
+          cb.disabled = true;
+          const r = await postJ("code/commit", { root: project.root, message: msg.value });
+          cb.disabled = false;
+          out.textContent = r.ok ? (r.output || "Committed.").split("\n")[0] : (r.error || r.output || "Commit failed.");
+          if (r.ok) setTimeout(loadChanges, 600);
+        });
+        ab.addEventListener("click", () => { setView("chat"); send("Look at the uncommitted changes (git diff) and write a short commit message for them. Don't commit."); });
+      }
+      if (!git.changes.length) box.appendChild(el("div", "note", "No uncommitted changes."));
+      const dv = el("pre", "diffv diff");
+      for (const c of git.changes) {
+        const code = c.code.trim()[0] === "?" ? "U" : c.code.trim()[0] || "M";
+        const row = el("div", "chg" + (diffFor === c.path ? " on" : ""), '<span class="cd ' + code + '">' + esc(c.code.trim() || "M") + '</span><span class="nm">' + esc(c.path) + "</span>");
+        row.addEventListener("click", async () => {
+          diffFor = c.path;
+          box.querySelectorAll(".chg").forEach((x) => x.classList.toggle("on", x === row));
+          const r = await getJ("code/diff?root=" + encodeURIComponent(project.root) + "&path=" + encodeURIComponent(c.path));
+          dv.innerHTML = r.ok && r.text ? diffHtml(r.text) : esc(code === "U" ? "A new file (not tracked yet): open it in Files." : r.error || "No diff.");
+          row.after(dv);
+        });
+        box.appendChild(row);
+      }
+      if (git.log.length) {
+        box.appendChild(el("div", "sec-h", "Latest commits")).style.margin = "12px 12px 4px";
+        const lg = box.appendChild(el("div", "log"));
+        for (const c of git.log) lg.appendChild(el("div", "lg", '<span class="h">' + esc(c.hash) + '</span><span class="grow">' + esc(c.msg) + '</span><span class="w">' + esc(new Date(c.at).toLocaleDateString([], { month: "short", day: "numeric" })) + "</span>"));
+      }
+    }
+
+    // ---- Wiring ----------------------------------------------------------------------------
+    $("#tabs").addEventListener("click", (e) => { const b = e.target.closest("button[data-v]"); if (b) setView(b.dataset.v); });
+    $("#b-proj").addEventListener("click", () => setView(view === "projects" && project ? "chat" : "projects"));
+    // The panel's own events: approvals answered elsewhere (the card).
+    (function connect() {
+      const es = new EventSource(API + "events");
+      es.onmessage = (m) => {
+        let ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
+        if (ev.type === "permission-done") {
+          const box = log.querySelector('.ask[data-id="' + ev.id + '"]');
+          if (box && !box.classList.contains("done")) { box.classList.add("done"); box.querySelector(".k").textContent = ev.allowed ? "Allowed" : "You said no"; }
+        }
+        if (ev.type === "settings") loadModels();
+      };
+      es.onerror = () => { es.close(); setTimeout(connect, 3000); };
+    })();
+    loadModels();
+    const last = store.get("project", null);
+    if (last) openProject(last).then(() => { if (!project) setView("projects"); }); else setView("projects");
+  </script>
+</body>
+</html>

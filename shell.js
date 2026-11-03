@@ -14,6 +14,8 @@ const APPS = {
   web: { title: "Web", src: "/app-web.html?site=web", ico: "web-ico", glyph: "🌐" },
   // Jarvis's conversation: what was asked, what he said, what he looked at.
   chat: { title: "Chat", src: "/app-chat.html", ico: "jarvis-ico", glyph: "💬" },
+  // Jarvis working on code: a project's files, its git changes, and him.
+  code: { title: "Jarvis Code", src: "/app-code.html", ico: "jarvis-ico", glyph: "⌘" },
 };
 const WEB_APPS = /^(youtube|shorts|tiktok|snapchat|web)$/;
 

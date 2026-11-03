@@ -118,6 +118,37 @@ box to type into instead.
    pronunciation. Needs `pip install kokoro-onnx` plus `kokoro-v1.0.onnx` and
    `voices-v1.0.bin`. The Windows voices are the fallback whenever Kokoro is
    missing or fails.
+
+   **Or a cloned voice: Qwen3-TTS** (Settings → Jarvis → Voice → *Qwen3 ·
+   cloned voice*; `tts-qwen.py`). He speaks in the voice of a short clip, using
+   a Qwen3-TTS *Base* model (Apache-2.0): `Qwen3-TTS-12Hz-0.6B-Base` (2.5 GB,
+   about 3 GB of VRAM) or `-1.7B-Base` (4.5 GB, about 5 GB). It runs through
+   [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts), which
+   captures the model's decode loop in CUDA graphs. Measured on the RTX 4080
+   SUPER, the plain `qwen-tts` package made speech at 0.4× real time (a
+   sentence took 2.5× as long as it lasts); this makes it at 2.5–3.3×, a
+   4-second sentence in about 1.2 s. It is resident on the GPU, takes 25–70 s
+   to load and warm up when the panel starts, and Kokoro speaks until it is
+   ready, if it fails, and, with *Free the GPU while gaming* on, while a game
+   is in front (it unloads, and loads again after). Layout, all under the Kokoro
+   folder unless *Qwen3-TTS folder* says otherwise:
+
+   - `qwen3-venv\`: its own Python 3.12 venv with `--system-site-packages`
+     (reusing the CUDA PyTorch already installed), with `qwen-tts` 0.1.1,
+     `faster-qwen3-tts` 0.3.0 and torchvision 0.21 / torchaudio 2.6 from the
+     cu124 index. It needs its own because `qwen-tts` pins
+     `transformers==4.57.3`, and the system torchvision 0.20.1 does not match
+     torch 2.6.
+   - `Qwen3-TTS-12Hz-0.6B-Base\`, `Qwen3-TTS-12Hz-1.7B-Base\`: the models,
+     each with its speech tokenizer inside.
+   - `voices\jarvis.mp3` and `voices\jarvis.txt`: the clip to clone and its
+     exact words (cloning needs both; Whisper wrote them). Any clip works:
+     point *Voice clip to clone* at it with a `.txt` of its words beside it.
+     A clip of a real person's voice stays out of the repo (`samplevoice/` is
+     ignored).
+
+   Each sentence is capped at about twice its expected length, so a sampled
+   long pause can't run on. The speed slider doesn't apply to it.
 6. **About you / memory.** Name, what to call you, free text, home for the
    weather. Memory is **one memory shared with the web UI**: the MCP memory
    server's knowledge graph (`E:\OLLAMAMODEL2026\memory.json`). Jarvis writes
@@ -273,6 +304,50 @@ ProgramData\Microsoft, never touches a whole drive or your whole user folder,
 and never opens the panel's own keys (Claude, Govee, Discord). A read of a big
 file is cut to what the model can take (about 9,000 characters for the local
 model, 30,000 for Claude) and continues from a line on request.
+
+### Jarvis Code
+
+An app (Jarvis Code, `app-code.html`) for working on code with Jarvis, on
+the panel:
+
+- **Projects**: the ones you have opened, and the git repos it finds in
+  Documents (one and two levels down), Desktop and `source\repos`; open any
+  folder by path, or create a new project (a folder in Documents with a git
+  repo and a README).
+- **Chat**: ask about the project or ask for changes. Every step shows as a
+  row (Overview, Read, Find, Edit with its diff, git …) that opens to what
+  came back, and approvals appear right on the step. A meter on top shows
+  the context window filling and the turn's tokens, and each answer ends with
+  what it used. Pick the model under the box: the everyday one, any other
+  local model, or Claude with a key. Each project keeps its own chat
+  (`Code: <name>` in Chats), and the conversation thread lasts an hour.
+- **Files**: browse the project and read any file with line numbers; *Ask
+  about it* starts a question about that file.
+- **Changes**: the branch and its upstream, what is uncommitted, the diff of
+  each file, a commit box (or *Ask Jarvis for a message*) and the latest
+  commits.
+
+A Code turn is not an ordinary Jarvis turn. It has its own short coding
+prompt (about 1.9k tokens instead of the everyday 9k, so the 9B's 16k
+context goes much further) and only the files, repo, web_search and
+read_page tools. It allows up to 30 steps and 4,096-token answers, and isn't
+spoken. When the conversation outgrows the model's window, old tool results
+are cut to a line first, then the oldest exchanges go. It always restarts on
+something you said, never part-way through a tool exchange. Approvals follow
+the Files and repos setting; the island card only shows Code's approvals when
+you are in another app. The app's own browsing (Files, Changes, Commit) is
+you, so it doesn't ask.
+
+### The API is for the panel only
+
+The server listens on 127.0.0.1, but any web page open on the PC (in a
+browser, or in the panel's own web apps) can send requests there. So
+`/api/*` refuses anything with another `Origin`, a `Sec-Fetch-Site` that
+isn't same-origin, or a `Host` other than `127.0.0.1` / `localhost` on the
+panel's port (DNS rebinding). The panel's pages are same-origin, and the
+helpers on the PC send no Origin, so they are unaffected. Without this, a
+page could start a Jarvis turn, change his settings (Files to Bypass), and
+reach the file tools.
 
 ### Usage and meters
 
@@ -1257,6 +1332,8 @@ wscript "autostart-hidden.vbs" 0
 | `assistant-usage.js` | Usage: every request, tool call and answer counted; totals per day, month and all time |
 | `govee.js` | Govee lights over the LAN API (and the cloud API, with a key) |
 | `tts-kokoro.py` | Jarvis's voice: Kokoro-82M, resident, one WAV per sentence |
+| `tts-qwen.py` | Jarvis's cloned voice: Qwen3-TTS through faster-qwen3-tts, resident on the GPU |
+| `app-code.html` | Jarvis Code: projects, a coding chat with every step shown, files, git changes |
 | `jarvis.js` / `jarvis.css` | Status bar, the island, alarms + timers, Jarvis's card and settings |
 | `voice/Program.cs` | Voice helper — wake word, online/offline dictation, voices, game probe |
 | `index.html` | UI layout |

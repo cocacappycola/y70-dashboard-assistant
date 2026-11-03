@@ -1481,6 +1481,7 @@
     "app:snapchat": "Snapchat for web",
     "app:web": "any web page (open_web)",
     "app:chat": "the conversation with Jarvis: questions, answers, the screenshots he looked at; opens by itself after a look",
+    "app:code": "Jarvis Code: a code project's files, its git changes, and a coding chat with Jarvis",
   };
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1991,8 +1992,11 @@
       case "memory":
         if (jarvisViewOpen()) loadFacts();
         return;
-      // Asked, or answered, from the Chat app as well.
-      case "permission": addPerm(ev); return;
+      // Asked, or answered, from the Chat app as well. Jarvis Code asks in its
+      // own window; the card only comes up for it when you are somewhere else.
+      case "permission":
+        if (!(ev.source === "code" && typeof state !== "undefined" && state.app === "code")) addPerm(ev);
+        return;
       case "permission-done": dropPerm(ev.id); return;
       case "think":
         onThink(ev);
@@ -2331,8 +2335,23 @@
     f.appendChild(label("Voice"));
     f.appendChild(toggle("Speak replies", null, JS.speak, (v) => saveSetting({ speak: v })));
     const tts = st.tts || {};
+    const qw = tts.qwen || {};
     const curTts = JS.tts || (tts.installed ? "kokoro" : "windows");
-    f.appendChild(chips([["kokoro", "Kokoro · natural"], ["windows", "Windows voices"]], curTts, (v) => saveSetting({ tts: v })));
+    f.appendChild(chips([["qwen", "Qwen3 · cloned voice"], ["kokoro", "Kokoro · natural"], ["windows", "Windows voices"]], curTts, (v) => saveSetting({ tts: v })));
+    if (curTts === "qwen") {
+      // Qwen3-TTS speaking in the voice of a clip (its words in a .txt beside it).
+      f.appendChild(chips([["0.6B", "0.6B · faster, ~3 GB VRAM"], ["1.7B", "1.7B · richer, ~5 GB VRAM"]], JS.qwenModel, (v) => saveSetting({ qwenModel: v })));
+      f.appendChild(status(
+        !qw.installed ? "Qwen3-TTS isn't set up: the folder needs qwen3-venv\\, Qwen3-TTS-12Hz-" + JS.qwenModel + "-Base\\ and the voice clip with a .txt of its words."
+          : qw.error ? "Qwen3-TTS: " + qw.error + " — Kokoro speaks meanwhile."
+          : qw.freedForGame ? "A game is in front: the cloned voice has given its VRAM back, and Kokoro speaks until the game ends."
+          : qw.ready ? "Ready" + (qw.info ? " · " + qw.info.model + " · loaded in " + qw.info.loadSeconds + " s · " + qw.info.vramGB + " GB" : "") + ". Voice: " + (qw.voice || "")
+          : qw.loading ? "Loading the cloned voice (about half a minute); Kokoro speaks until it's ready." : "It loads with the panel; Kokoro speaks until then.",
+        !qw.installed || qw.error ? "warn" : qw.ready ? "good" : ""));
+      f.appendChild(toggle("Free the GPU while gaming", "unload the cloned voice when a game is in front (Kokoro speaks meanwhile), load it again after", JS.qwenGameFree, (v) => saveSetting({ qwenGameFree: v })));
+      f.appendChild(textRow(JS.qwenVoice, "Voice clip to clone (default: <folder>\\voices\\jarvis.mp3)", "Save", (v) => saveSetting({ qwenVoice: v })));
+      f.appendChild(textRow(JS.qwenDir, "Qwen3-TTS folder (default: the Kokoro folder)", "Save", (v) => saveSetting({ qwenDir: v })));
+    }
     if (curTts === "kokoro") {
       if (!tts.installed) {
         f.appendChild(status("Kokoro isn't installed: set the folder with kokoro-v1.0.onnx and voices-v1.0.bin (and pip install kokoro-onnx).", "warn"));
@@ -2372,7 +2391,9 @@
       J.reply = saved;
     });
     f.appendChild(el("div", "jf-row")).appendChild(test);
-    f.appendChild(status(curTts === "kokoro"
+    f.appendChild(status(curTts === "qwen"
+      ? "The cloned voice runs on the GPU and ignores the speed slider. Kokoro (" + (JS.kokoroVoice || "") + ") stands in while it loads, during games, or if it fails."
+      : curTts === "kokoro"
       ? "Kokoro runs on the CPU, so it takes no VRAM from games or the local models. George, Lewis, Daniel and Fable suit a Jarvis."
       : "More voices: Windows Settings › Time & language › Speech › Add voices (an en-GB voice suits a Jarvis)."));
 

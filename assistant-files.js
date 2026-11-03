@@ -482,4 +482,59 @@ const TOOL_DEFS = [
   },
 ];
 
-module.exports = { init, files, repo, TOOL_DEFS, resolve, guard };
+// ---- for the Jarvis Code app (you browsing, not the model) --------------------------
+async function listDir(p) {
+  const g = guard(p, false);
+  if (g) return { ok: false, error: g };
+  const st = await stat(p);
+  if (!st || !st.isDirectory()) return { ok: false, error: "No folder at " + p };
+  const ents = await fsp.readdir(p, { withFileTypes: true }).catch(() => []);
+  const out = [];
+  for (const e of ents.slice(0, 2000)) {
+    if (e.name === ".git") continue;
+    const s = e.isDirectory() ? null : await stat(path.join(p, e.name));
+    out.push({ name: e.name, dir: e.isDirectory(), size: s ? s.size : 0, at: s ? s.mtimeMs : 0, skip: e.isDirectory() && SKIP_DIRS.has(e.name) });
+  }
+  out.sort((x, y) => (y.dir - x.dir) || x.name.localeCompare(y.name, undefined, { numeric: true, sensitivity: "base" }));
+  return { ok: true, path: p, parent: path.dirname(p) !== p ? path.dirname(p) : null, entries: out };
+}
+async function readText(p, max) {
+  const g = guard(p, false);
+  if (g) return { ok: false, error: g };
+  const st = await stat(p);
+  if (!st || st.isDirectory()) return { ok: false, error: "No file at " + p };
+  if (st.size > (max || 2 * 1024 * 1024)) return { ok: true, path: p, size: st.size, tooBig: true, text: "" };
+  const buf = await fsp.readFile(p);
+  if (isBinary(buf)) return { ok: true, path: p, size: st.size, binary: true, text: "" };
+  return { ok: true, path: p, size: st.size, at: st.mtimeMs, text: buf.toString("utf8") };
+}
+async function gitStatus(root) {
+  if (!(await stat(path.join(root, ".git")))) return { ok: true, git: false };
+  const [br, stt, lg, rem] = await Promise.all([
+    run("git", ["branch", "--show-current"], root, 15000),
+    run("git", ["status", "--porcelain=v1", "--branch", "--untracked-files=all"], root, 20000),
+    run("git", ["log", "-n", "15", "--date=iso-strict", "--format=%h%x09%ad%x09%an%x09%s"], root, 20000),
+    run("git", ["remote", "-v"], root, 15000),
+  ]);
+  const lines = stt.out.split(/\r?\n/).filter(Boolean);
+  const head = lines[0] && lines[0].startsWith("##") ? lines.shift() : "";
+  const ab = head.match(/\[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\]/);
+  return {
+    ok: true, git: true, branch: br.out.trim(),
+    upstream: (head.match(/\.\.\.(\S+)/) || [])[1] || null,
+    ahead: ab && ab[1] ? Number(ab[1]) : 0, behind: ab && ab[2] ? Number(ab[2]) : 0,
+    changes: lines.map((l) => ({ code: l.slice(0, 2), path: l.slice(3).replace(/^"|"$/g, "") })),
+    log: lg.out.trim().split(/\r?\n/).filter(Boolean).map((l) => { const [h, at, who, msg] = l.split("\t"); return { hash: h, at, who, msg }; }),
+    remotes: [...new Set(rem.out.trim().split(/\r?\n/).filter(Boolean).map((l) => l.split(/\s+/).slice(0, 2).join(" ")))],
+  };
+}
+async function gitDiff(root, file) {
+  const args = ["diff", "HEAD", "--no-color", "--"];
+  if (file) args.push(file);
+  let r = await run("git", args, root, 30000);
+  // A repo with no commits yet has no HEAD: show what is staged and not.
+  if (!r.ok && /ambiguous argument 'HEAD'|bad revision/.test(r.err)) r = await run("git", ["diff", "--no-color", "--"].concat(file ? [file] : []), root, 30000);
+  return { ok: r.ok, text: r.out, error: r.ok ? null : r.err.trim() };
+}
+
+module.exports = { init, files, repo, TOOL_DEFS, resolve, guard, listDir, readText, gitStatus, gitDiff, run, findRepoRoot, SKIP_DIRS };

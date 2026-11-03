@@ -529,7 +529,7 @@
         Object.entries(b.tools || {}).sort((x, y) => y[1].calls - x[1].calls).map(([k, t]) =>
           "<tr>" + td(esc(k)) + td(t.calls, 1) + td(t.ok, 1) + td(t.fail, 1, t.fail ? "bad" : "") + td(secs(t.ms / t.calls), 1) + td(secs(t.maxMs), 1) + "</tr>")));
       // What the tokens went on
-      const KIND = { turn: "answering you", notes: "memory note-taker", think: "thinking hard" };
+      const KIND = { turn: "answering you", code: "Jarvis Code", notes: "memory note-taker", think: "thinking hard" };
       h.push('<div class="sec-h">Spent on</div>');
       h.push(table([{ t: "what" }, { t: "requests", n: 1 }, { t: "in", n: 1 }, { t: "out", n: 1 }],
         Object.entries(b.kinds || {}).map(([k, x]) => "<tr>" + td(KIND[k] || esc(k)) + td(x.requests, 1) + td(kfmt(x.in), 1) + td(kfmt(x.out), 1) + "</tr>")));
@@ -586,7 +586,7 @@
         box.appendChild(d);
       }
     }
-    fetch(API + "permissions").then((x) => x.json()).then((r) => { for (const p of (r && r.pending) || []) permsList.push(p); drawPerms(); }).catch(() => {});
+    fetch(API + "permissions").then((x) => x.json()).then((r) => { for (const p of (r && r.pending) || []) if (p.source !== "code") permsList.push(p); drawPerms(); }).catch(() => {});
     // New: the next thing you ask starts a fresh chat.
     $("#b-new").addEventListener("click", async () => {
       await fetch(API + "chats/new", { method: "POST" }).catch(() => {});
@@ -624,7 +624,8 @@
           return;
         }
         if (ev.type === "permission") {
-          if (!permsList.some((p) => p.id === ev.id)) { permsList.push(ev); drawPerms(); }
+          // Jarvis Code's own steps are approved there (or on the card).
+          if (ev.source !== "code" && !permsList.some((p) => p.id === ev.id)) { permsList.push(ev); drawPerms(); }
           return;
         }
         if (ev.type === "permission-done") {
