@@ -43,6 +43,12 @@ function init(o) {
 }
 function save() { try { fs.writeFileSync(stateFile, JSON.stringify(state, null, 1)); } catch (e) {} }
 
+// "View-All Files" -> "view_all_files": a name that is also an identifier in
+// the template's code (a dash in a JS method or Python def is a syntax error).
+function toolName(raw) {
+  return String(raw || "").toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^[^a-z]+/, "").replace(/_+$/, "").slice(0, 41);
+}
+
 // ---- reading packages ------------------------------------------------------------
 function readManifest(pdir) {
   let m;
@@ -53,7 +59,7 @@ function readManifest(pdir) {
   if (!Array.isArray(m.run) || !m.run.length || !m.run.every((x) => typeof x === "string")) problems.push("run must be a command as a list, e.g. [\"node\", \"index.js\"]");
   if (!Array.isArray(m.tools) || !m.tools.length) problems.push("tools must list at least one tool");
   for (const t of Array.isArray(m.tools) ? m.tools : []) {
-    if (!TOOL.test(String(t.name || ""))) problems.push("tool name \"" + t.name + "\" must be lowercase letters, digits and underscores, starting with a letter");
+    if (!TOOL.test(String(t.name || ""))) problems.push("tool name \"" + t.name + "\" must be lowercase letters, digits and underscores, starting with a letter" + (toolName(t.name) ? " (try \"" + toolName(t.name) + "\", in the manifest and the code)" : ""));
     if (!t.description || String(t.description).length < 10) problems.push("tool " + t.name + " needs a description (it is how Jarvis knows when to use it)");
     if (!t.input_schema || t.input_schema.type !== "object") problems.push("tool " + t.name + " needs an input_schema of type object");
   }
@@ -251,15 +257,46 @@ function call(toolName, input, ctx) {
   if (!p) return Promise.resolve(["No enabled package has a tool called " + toolName + ".", true]);
   return callPkg(p, toolName, input, ctx);
 }
+// Before a test: does the program even compile? A syntax error otherwise
+// shows up only as "the package stopped", which tells whoever wrote it
+// (often Jarvis) nothing. Node and Python files are checked; the error comes
+// back with its line.
+function syntaxCheck(p) {
+  return new Promise((resolve) => {
+    const [head, file] = p.manifest.run;
+    if (!file || !/\.(c|m)?js$|\.py$/i.test(file)) return resolve(null);
+    const full = path.resolve(p.dir, file);
+    if (!fs.existsSync(full)) return resolve("run names " + file + ", which isn't in the package");
+    const isPy = /\.py$/i.test(file);
+    if (isPy && head !== "python" && head !== "py") return resolve(null);
+    if (!isPy && head !== "node") return resolve(null);
+    const cmd = isPy ? head : process.execPath;
+    const args = isPy ? ["-m", "py_compile", full] : ["--check", full];
+    execFile(cmd, args, { cwd: p.dir, windowsHide: true, timeout: 20000, env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" } }, (err, out, errOut) => {
+      if (!err) return resolve(null);
+      const text = String(errOut || out || err.message).replace(/\r/g, "").trim().split("\n").filter((l) => !/^\s+at |^Node\.js v/.test(l)).slice(0, 8).join("\n");
+      resolve(text || err.message);
+    });
+  });
+}
+
 // A tool of a package that isn't enabled (yet): only after a yes.
-function test(name, toolName, input, ctx) {
+async function test(name, tool, input, ctx) {
   scan();
   const p = pkgs.get(name);
-  if (!p || !p.manifest) return Promise.resolve(["No package called " + name + ".", true]);
-  if (p.problems.length) return Promise.resolve(["Package " + name + " has problems: " + p.problems.join("; "), true]);
-  if (!p.tools.some((t) => t.name === toolName)) return Promise.resolve([name + " has no tool called " + toolName + " (it has " + p.tools.map((t) => t.name).join(", ") + ").", true]);
+  if (!p || !p.manifest) return ["No package called " + name + ".", true];
+  if (p.problems.length) return ["Package " + name + " has problems: " + p.problems.join("; "), true];
+  if (!p.tools.some((t) => t.name === tool)) return [name + " has no tool called " + tool + " (it has " + p.tools.map((t) => t.name).join(", ") + ").", true];
+  const bad = await syntaxCheck(p);
+  if (bad) {
+    const rec = procs.get(name) || { logs: [], calls: 0, lastError: null, seq: 0, waiters: new Map(), child: null, buf: "", idle: null };
+    procs.set(name, rec);
+    rec.lastError = "the code doesn't compile";
+    log(rec, "syntax check failed:\n" + bad);
+    return ["The code doesn't compile, so nothing ran:\n" + bad, true];
+  }
   stop(name);                      // the code may have just changed: a fresh process
-  return callPkg(p, toolName, input, ctx);
+  return callPkg(p, tool, input, ctx);
 }
 
 // ---- managing ---------------------------------------------------------------------------
@@ -338,8 +375,11 @@ function create(o) {
   const pdir = path.join(dir, name);
   if (fs.existsSync(pdir)) return { ok: false, error: "There is a package called " + name + " already, in " + pdir + "." };
   const lang = o.language === "python" ? "python" : "node";
-  const tools = (Array.isArray(o.tools) && o.tools.length ? o.tools : [{ name: name.replace(/-/g, "_"), description: "Say what this does and when to use it.", input_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }])
-    .map((t) => ({ name: String(t.name || "").toLowerCase(), description: String(t.description || ""), input_schema: t.input_schema || t.parameters || { type: "object", properties: {} } }));
+  const seen = new Set();
+  const tools = (Array.isArray(o.tools) && o.tools.length ? o.tools : [{ name: name, description: "Say what this does and when to use it.", input_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }])
+    .map((t) => ({ name: toolName(t.name) || toolName(name), description: String(t.description || ""), input_schema: t.input_schema || t.parameters || { type: "object", properties: {} } }))
+    .filter((t) => t.name && !seen.has(t.name) && seen.add(t.name));
+  if (!tools.length) return { ok: false, error: "Give each tool a name made of letters, digits and underscores." };
   const manifest = {
     name, version: "0.1.0", description: String(o.description || "What this package does, in a sentence."), author: String(o.author || ""),
     run: lang === "python" ? ["python", "tool.py"] : ["node", "index.js"], timeout: 30, permissions: [],
@@ -352,7 +392,7 @@ function create(o) {
   else fs.writeFileSync(path.join(pdir, "index.js"), JS_TEMPLATE(cases));
   fs.writeFileSync(path.join(pdir, "README.md"), "# " + name + "\n\n" + manifest.description + "\n\nA Jarvis tool package. See the guide (docs/PACKAGES.md in the dashboard).\n");
   scan();
-  return { ok: true, name, dir: pdir, files: [MANIFEST, lang === "python" ? "tool.py" : "index.js", "README.md"] };
+  return { ok: true, name, dir: pdir, language: lang, tools: tools.map((t) => t.name), files: [MANIFEST, lang === "python" ? "tool.py" : "index.js", "README.md"] };
 }
 
 const JS_TEMPLATE = (names) => `// A Jarvis tool package. Jarvis sends one JSON line per call on stdin:

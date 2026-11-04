@@ -170,6 +170,13 @@ Two more rules from experience with small local models:
 
 ## 4. Running
 
+**A package is its own program.** It can't call Jarvis's tools (`files`,
+`web_search`, `info`…): those exist only inside Jarvis. It does its work with
+its language's own libraries: in Node, `fs`, `path`, `child_process` and
+`fetch`; in Python, `os`, `pathlib`, `subprocess` and `urllib`. And since a
+package's tool runs on your say-so, keep it to the one job its description
+promises.
+
 `run` is the command, as a list:
 
 | `run` | Runs |
@@ -321,6 +328,8 @@ switch it on after reading it.
 | What you see | What to check |
 |---|---|
 | "can't start" / *exited (1)* in the log | The `run` command: does `node index.js` or `python tool.py` work from that folder in a terminal? For Python, is the module installed? |
+| *The code doesn't compile* | A test checks the code first (`node --check`, `python -m py_compile`) and shows the error with its line. A tool name with a dash in a method name (`async view-all-files()`) is the classic one. |
+| `files is not defined` (or any of Jarvis's tool names) | The package called one of Jarvis's tools. It can't: do the work with the language's own libraries (see [Running](#4-running)). |
 | The call times out | Did you flush stdout? Did you answer with the same `id`? Is the work slower than `timeout`? |
 | Jarvis never uses the tool | Its description: say plainly what it is for and when. Check the package is on. Small local models only get `core` tools. |
 | Jarvis passes the wrong arguments | Simplify the schema, use `enum`, describe each field with an example. |

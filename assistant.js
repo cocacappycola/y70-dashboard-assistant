@@ -2450,7 +2450,7 @@ async function packagesTool(a, emit, conv) {
     if (!r.ok) return [r.error, true];
     if (conv) conv.fsCwd = r.dir;
     broadcast({ type: "packages" });
-    return ["Made package " + r.name + " in " + r.dir + " (" + r.files.join(", ") + "). Now write the real code with the files tool (it is a template that says \"Not built yet\"), keep jarvis-package.json's tools in step with it, then test it with packages test, and ask the user to enable it with packages enable."];
+    return ["Made package " + r.name + " in " + r.dir + " (" + r.files.join(", ") + ") with the tool" + (r.tools.length > 1 ? "s " : " ") + r.tools.join(", ") + ". Now write the real code with the files tool: edit the template's function bodies (they say \"Not built yet\"), keeping the function names exactly as they are. The package is a separate program: it cannot call your tools (files, web_search…); use " + (r.language === "python" ? "Python's own os, pathlib, subprocess, urllib" : "Node's own fs, path, child_process, fetch") + ". Keep jarvis-package.json's tools in step with the code, then test it with packages test (it checks the code compiles), and ask the user to enable it with packages enable."];
   }
   const name = String(a.name || "").trim().toLowerCase();
   if (act === "logs") return [packages.logs(name).slice(-60).join("\n") || "(nothing logged yet)"];
