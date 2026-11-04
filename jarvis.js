@@ -741,7 +741,9 @@
       if (p.path) box.appendChild(el("div", "jp-p", p.path));
       if (p.detail) box.appendChild(el("pre", "jp-d", p.detail));
       const row = box.appendChild(el("div", "jp-btns"));
+      // Running code (a tool package) is asked every time: no "for this chat".
       for (const [answer, text, cls] of [["allow", "Allow", "btn--primary"], ["always", "Allow for this chat", "btn--ghost"], ["deny", "No", "btn--ghost"]]) {
+        if (answer === "always" && p.always) continue;
         const b = row.appendChild(el("button", "btn btn--sm " + cls, text));
         b.addEventListener("pointerup", () => answerPerm(p.id, answer));
       }
@@ -1482,6 +1484,7 @@
     "app:web": "any web page (open_web)",
     "app:chat": "the conversation with Jarvis: questions, answers, the screenshots he looked at; opens by itself after a look",
     "app:code": "Jarvis Code: a code project's files, its git changes, and a coding chat with Jarvis",
+    "app:packages": "Packages: Jarvis's tool packages (switch on and off, test, install, make new ones) and the guide to making them",
   };
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1992,6 +1995,10 @@
       case "memory":
         if (jarvisViewOpen()) loadFacts();
         return;
+      // A voice being designed: the settings show it arriving.
+      case "voice-design":
+        if (jarvisViewOpen()) refreshSettings();
+        return;
       // Asked, or answered, from the Chat app as well. Jarvis Code asks in its
       // own window; the card only comes up for it when you are somewhere else.
       case "permission":
@@ -2245,6 +2252,15 @@
       bypass: "He reads and changes files and runs git without asking. Deletes still go to the Recycle Bin; Windows, Program Files and the panel's keys stay off-limits.",
     }[JS.files] || "", JS.files === "bypass" ? "warn" : ""));
 
+    // ---- Tool packages
+    f.appendChild(label("Tool packages", "his tools from outside the dashboard"));
+    const pkRow = el("div", "jf-row");
+    const pkBtn = el("button", "btn btn--ghost btn--sm", "Open Packages");
+    pkBtn.addEventListener("pointerup", () => { showJarvisView(false); try { openDrawer(false); } catch (e) {} setApp("packages"); });
+    pkRow.appendChild(pkBtn);
+    f.appendChild(pkRow);
+    f.appendChild(status("Switch packages on and off, test them, install examples or your own, and read the guide to making them. Or ask: “Jarvis, make me a tool package that…”"));
+
     // ---- Getting more models
     f.appendChild(label("Get a model", "Hugging Face, or say “Jarvis, download…”"));
     f.appendChild(textRow("", "Search, e.g. qwen 3.5 27b, or paste a link", "Find", async (v, inp) => {
@@ -2337,19 +2353,52 @@
     const tts = st.tts || {};
     const qw = tts.qwen || {};
     const curTts = JS.tts || (tts.installed ? "kokoro" : "windows");
-    f.appendChild(chips([["qwen", "Qwen3 · cloned voice"], ["kokoro", "Kokoro · natural"], ["windows", "Windows voices"]], curTts, (v) => saveSetting({ tts: v })));
+    f.appendChild(chips([["qwen", "Qwen3 · cloned or stock"], ["kokoro", "Kokoro · natural"], ["windows", "Windows voices"]], curTts, (v) => saveSetting({ tts: v })));
     if (curTts === "qwen") {
-      // Qwen3-TTS speaking in the voice of a clip (its words in a .txt beside it).
-      f.appendChild(chips([["0.6B", "0.6B · faster, ~3 GB VRAM"], ["1.7B", "1.7B · richer, ~5 GB VRAM"]], JS.qwenModel, (v) => saveSetting({ qwenModel: v })));
+      // Qwen3-TTS: a cloned voice (any clip in the library) or a stock speaker.
+      const stock = JS.qwenMode === "stock";
+      const have = (qw.models && (stock ? qw.models.stock : qw.models.base)) || [];
+      f.appendChild(chips([["clone", "Cloned voice"], ["stock", "Stock voices"]], JS.qwenMode || "clone", (v) => saveSetting({ qwenMode: v })));
+      f.appendChild(chips([["0.6B", "0.6B · faster, ~3 GB VRAM"], ["1.7B", "1.7B · richer, ~5 GB VRAM" + (stock ? ", takes a style" : "")]].map(([v, l]) => [v, l + (have.length && !have.includes(v) ? " · not downloaded" : "")]),
+        JS.qwenModel, (v) => saveSetting({ qwenModel: v })));
       f.appendChild(status(
-        !qw.installed ? "Qwen3-TTS isn't set up: the folder needs qwen3-venv\\, Qwen3-TTS-12Hz-" + JS.qwenModel + "-Base\\ and the voice clip with a .txt of its words."
+        !qw.installed ? "Qwen3-TTS isn't set up for this: the folder needs qwen3-venv\\ and Qwen3-TTS-12Hz-" + JS.qwenModel + "-" + (stock ? "CustomVoice" : "Base") + "\\" + (stock ? "." : ", and the voice clip with a .txt of its words.")
           : qw.error ? "Qwen3-TTS: " + qw.error + " — Kokoro speaks meanwhile."
-          : qw.freedForGame ? "A game is in front: the cloned voice has given its VRAM back, and Kokoro speaks until the game ends."
-          : qw.ready ? "Ready" + (qw.info ? " · " + qw.info.model + " · loaded in " + qw.info.loadSeconds + " s · " + qw.info.vramGB + " GB" : "") + ". Voice: " + (qw.voice || "")
-          : qw.loading ? "Loading the cloned voice (about half a minute); Kokoro speaks until it's ready." : "It loads with the panel; Kokoro speaks until then.",
+          : qw.freedForGame ? "A game is in front: the voice has given its VRAM back, and Kokoro speaks until the game ends."
+          : qw.ready ? "Ready" + (qw.info ? " · " + qw.info.model + " · loaded in " + qw.info.loadSeconds + " s · " + qw.info.vramGB + " GB" : "")
+          : qw.loading ? "Loading (about half a minute); Kokoro speaks until it's ready." : "It loads with the panel; Kokoro speaks until then.",
         !qw.installed || qw.error ? "warn" : qw.ready ? "good" : ""));
-      f.appendChild(toggle("Free the GPU while gaming", "unload the cloned voice when a game is in front (Kokoro speaks meanwhile), load it again after", JS.qwenGameFree, (v) => saveSetting({ qwenGameFree: v })));
-      f.appendChild(textRow(JS.qwenVoice, "Voice clip to clone (default: <folder>\\voices\\jarvis.mp3)", "Save", (v) => saveSetting({ qwenVoice: v })));
+      if (stock) {
+        // Changing speaker or style is instant: each sentence names its own.
+        const SP = qw.speakers || {};
+        f.appendChild(chips(Object.keys(SP).map((k) => [k, k.replace("_", " ").replace(/\b\w/g, (c) => c.toUpperCase()) + " · " + SP[k]]), JS.qwenSpeaker, (v) => saveSetting({ qwenSpeaker: v })));
+        if (JS.qwenModel === "1.7B") f.appendChild(textRow(JS.qwenStyle, "Style, e.g. calm and low, dry and precise, cheerful", "Save", (v) => saveSetting({ qwenStyle: v })));
+        else f.appendChild(status("Styles (calm, excited, a whisper…) need the 1.7B."));
+      } else {
+        // The library: the JARVIS sample and every voice designed here.
+        const lib = (qw.voices || []).filter((v) => v.ready);
+        const cur = JS.qwenVoice || (lib.find((v) => v.name === "jarvis") || {}).path || "";
+        if (lib.length) f.appendChild(chips(lib.map((v) => [v.path, v.name]), cur, (v) => saveSetting({ qwenVoice: v })));
+        // Design a new one from a description.
+        if (qw.models && qw.models.design) {
+          f.appendChild(label("Design a voice", "describe it; it joins the list above"));
+          const d = el("div", "jf-row");
+          const nm = kbInput(el("input", "ui-input")); nm.placeholder = "Name, e.g. butler"; nm.style.maxWidth = "140px";
+          const ds = kbInput(el("input", "ui-input")); ds.placeholder = "A calm, dry British man in his forties, precise, a little wry";
+          const go = el("button", "btn btn--ghost btn--sm", qw.designing ? "Designing…" : "Create");
+          go.disabled = !!qw.designing;
+          go.addEventListener("pointerup", async () => {
+            go.disabled = true; go.textContent = "Designing…";
+            const r = await post("voices/design", { name: nm.value, description: ds.value });
+            if (!r.ok) { go.disabled = false; go.textContent = "Create"; const s = status(r.error, "bad"); d.after(s); setTimeout(() => s.remove(), 6000); }
+          });
+          d.append(nm, ds, go);
+          f.appendChild(d);
+          f.appendChild(status(qw.designing ? "Designing “" + qw.designing.name + "” (about a minute: it loads the 1.7B VoiceDesign model, says a few sentences, and saves them)." : "It says a few sentences in the voice you describe and saves them as a clip, which is then cloned, so the voice stays the same every time."));
+        }
+        f.appendChild(textRow(JS.qwenVoice, "Or any clip, with a .txt of its words beside it", "Save", (v) => saveSetting({ qwenVoice: v })));
+      }
+      f.appendChild(toggle("Free the GPU while gaming", "unload the voice when a game is in front (Kokoro speaks meanwhile), load it again after", JS.qwenGameFree, (v) => saveSetting({ qwenGameFree: v })));
       f.appendChild(textRow(JS.qwenDir, "Qwen3-TTS folder (default: the Kokoro folder)", "Save", (v) => saveSetting({ qwenDir: v })));
     }
     if (curTts === "kokoro") {
@@ -2369,7 +2418,7 @@
         f.appendChild(status(tts.running ? "Loading voices…" : "Kokoro loads with the first answer (about 3 s).", ""));
       }
       f.appendChild(textRow(JS.kokoroDir, "Kokoro folder (kokoro-v1.0.onnx, voices-v1.0.bin)", "Save", (v) => saveSetting({ kokoroDir: v })));
-    } else {
+    } else if (curTts === "windows") {
       const voices = (vo.voices || []).filter((v) => /^en/i.test(v.lang));
       if (voices.length) f.appendChild(chips(voices.map((v) => [v.name, v.name.replace(/^Microsoft /, "") + " · " + v.lang]), JS.voice, (v) => saveSetting({ voice: v })));
     }
@@ -2392,7 +2441,7 @@
     });
     f.appendChild(el("div", "jf-row")).appendChild(test);
     f.appendChild(status(curTts === "qwen"
-      ? "The cloned voice runs on the GPU and ignores the speed slider. Kokoro (" + (JS.kokoroVoice || "") + ") stands in while it loads, during games, or if it fails."
+      ? "Qwen3 voices run on the GPU and ignore the speed slider. Kokoro (" + (JS.kokoroVoice || "") + ") stands in while one loads, during games, or if it fails."
       : curTts === "kokoro"
       ? "Kokoro runs on the CPU, so it takes no VRAM from games or the local models. George, Lewis, Daniel and Fable suit a Jarvis."
       : "More voices: Windows Settings › Time & language › Speech › Add voices (an en-GB voice suits a Jarvis)."));

@@ -16,6 +16,8 @@ const APPS = {
   chat: { title: "Chat", src: "/app-chat.html", ico: "jarvis-ico", glyph: "💬" },
   // Jarvis working on code: a project's files, its git changes, and him.
   code: { title: "Jarvis Code", src: "/app-code.html", ico: "jarvis-ico", glyph: "⌘" },
+  // Tool packages: tools for Jarvis from outside the dashboard, and the guide.
+  packages: { title: "Packages", src: "/app-packages.html", ico: "jarvis-ico", glyph: "⧉" },
 };
 const WEB_APPS = /^(youtube|shorts|tiktok|snapchat|web)$/;
 

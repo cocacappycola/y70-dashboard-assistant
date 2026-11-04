@@ -1,0 +1,44 @@
+{
+  "name": "dice",
+  "version": "1.0.0",
+  "description": "Rolls dice, flips coins and picks something at random.",
+  "author": "Jarvis examples",
+  "run": ["node", "index.js"],
+  "timeout": 10,
+  "permissions": [],
+  "guide": "dice rolls (including notation like 2d6+3), coin flips, picking one of several things at random",
+  "tools": [
+    {
+      "name": "roll_dice",
+      "description": "Roll dice. Use for \"roll a d20\", \"roll 3d6+2\", \"roll two dice\". notation: dice notation like 2d6, d20 or 4d8+3 (default 1d6). Returns every roll and the total.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "notation": { "type": "string", "description": "e.g. d20, 2d6, 4d8+3" }
+        }
+      }
+    },
+    {
+      "name": "flip_coin",
+      "description": "Flip a coin (or several). Use for \"heads or tails\", \"flip a coin\". count: how many flips (default 1). Returns each result.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "count": { "type": "integer", "minimum": 1, "maximum": 100 }
+        }
+      }
+    },
+    {
+      "name": "pick_one",
+      "description": "Pick one (or a few) at random from a list. Use for \"choose for me\", \"pick a movie from these\", \"who goes first\". options: the choices. count: how many to pick, without repeats (default 1).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "options": { "type": "array", "items": { "type": "string" } },
+          "count": { "type": "integer", "minimum": 1 }
+        },
+        "required": ["options"]
+      }
+    }
+  ]
+}

@@ -411,6 +411,7 @@
                 (ev.path ? '<div class="p">' + esc(ev.path) + "</div>" : "") + (ev.detail ? '<pre class="diff">' + diffHtml(ev.detail) + "</pre>" : "") + '<div class="b"></div>');
               box.dataset.id = ev.id;
               for (const [ans, t, cls] of [["allow", "Allow", "btn--primary"], ["always", "Allow for this chat", "btn--ghost"], ["deny", "No", "btn--ghost"]]) {
+                if (ans === "always" && ev.always) continue;
                 const b = el("button", "btn btn--sm " + cls, t);
                 b.type = "button";
                 b.addEventListener("click", () => { box.classList.add("done"); postJ("permission/" + ev.id, { answer: ans }); });
@@ -592,6 +593,8 @@
       };
       es.onerror = () => { es.close(); setTimeout(connect, 3000); };
     })();
+    // Another app (Packages) asking for a folder to be opened here.
+    try { new BroadcastChannel("jcode").onmessage = (m) => { if (m.data && m.data.open) openProject(m.data.open); }; } catch (e) {}
     loadModels();
     const last = store.get("project", null);
     if (last) openProject(last).then(() => { if (!project) setView("projects"); }); else setView("projects");

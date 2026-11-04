@@ -1,0 +1,33 @@
+{
+  "name": "text-tools",
+  "version": "1.0.0",
+  "description": "Counts words and reading time, and changes the case of text.",
+  "author": "Jarvis examples",
+  "run": ["python", "tool.py"],
+  "timeout": 15,
+  "permissions": [],
+  "guide": "word, character and sentence counts and reading time for a piece of text; changing text to UPPER, lower, Title, camelCase or snake_case",
+  "tools": [
+    {
+      "name": "text_stats",
+      "description": "Count the words, characters, sentences and paragraphs in a piece of text, with reading and speaking time. Use for \"how many words is this\", \"how long to read\". text: the text itself.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "change_case",
+      "description": "Rewrite text in another case. Use for \"make this uppercase\", \"snake_case these\", \"title case this headline\". text: the text. to: upper, lower, title, sentence, camel or snake.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "to": { "type": "string", "enum": ["upper", "lower", "title", "sentence", "camel", "snake"] }
+        },
+        "required": ["text", "to"]
+      }
+    }
+  ]
+}

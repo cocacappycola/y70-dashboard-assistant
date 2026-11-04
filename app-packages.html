@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en" data-surface="trim">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Packages</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/ui.css" />
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--t-bg, #000); color: var(--t-text, #f2f2f7); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+    #wrap { height: 100%; display: flex; flex-direction: column; }
+    #head { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--t-bg-2, #101014); border-bottom: 1px solid var(--t-accent-line, rgba(168,92,214,.35)); }
+    .ico { width: 22px; height: 22px; border-radius: 6px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 13px;
+      background: radial-gradient(circle at 35% 30%, #b9a6ff 0, var(--t-accent, #a85cd6) 55%, #26124a 100%); }
+    .ht { flex: 1; min-width: 0; }
+    #title { font-size: 15px; font-weight: 750; }
+    #sub { font-size: 11px; color: var(--t-sub, #a6a6b3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tabs { flex-shrink: 0; display: flex; gap: 4px; padding: 6px 10px; background: var(--t-bg-2, #101014); border-bottom: 1px solid var(--t-line, #2c2c33); }
+    .tabs button { flex: 1; min-height: 34px; border: 0; border-radius: 10px; background: transparent; color: var(--t-sub, #a6a6b3); font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; }
+    .tabs button.on { background: var(--t-accent-soft, rgba(168,92,214,.25)); color: var(--t-text, #fff); }
+    .view { flex: 1; min-height: 0; overflow-y: auto; display: none; padding: 12px; flex-direction: column; gap: 10px; }
+    .view.show { display: flex; }
+    .view > * { flex: none; }
+    .card { background: var(--t-surface, #16161a); border: 1px solid var(--t-line, #2c2c33); border-radius: 14px; padding: 12px 13px; display: flex; flex-direction: column; gap: 6px; }
+    .card.on { border-color: rgba(70,209,138,.45); }
+    .card.warn { border-color: rgba(255,179,92,.5); }
+    .top { display: flex; gap: 8px; align-items: baseline; }
+    .nm { font-size: 15px; font-weight: 750; }
+    .ver { font-size: 11px; color: var(--t-muted, #7a7a85); }
+    .badge { margin-left: auto; font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 2px 8px; border-radius: 8px; background: rgba(255,255,255,.07); color: var(--t-sub, #a6a6b3); }
+    .badge.on { background: rgba(70,209,138,.16); color: #46d18a; }
+    .badge.warn { background: rgba(255,179,92,.16); color: #ffb35c; }
+    .badge.bad { background: rgba(255,91,110,.16); color: #ff8f8f; }
+    .desc { font-size: 13px; color: var(--t-sub, #c9c9d3); line-height: 1.4; }
+    .meta { font-size: 11px; color: var(--t-muted, #7a7a85); word-break: break-all; }
+    .tools { display: flex; flex-wrap: wrap; gap: 5px; }
+    .tool { font: 11.5px ui-monospace, Consolas, monospace; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,.06); color: var(--t-text, #ddd); }
+    .prob { font-size: 12px; color: #ffb35c; }
+    .btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+    .box { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--t-line, #2c2c33); }
+    .box select, .box textarea { width: 100%; }
+    textarea.ui-input { font: 12px/1.4 ui-monospace, Consolas, monospace; min-height: 64px; resize: vertical; }
+    pre.out { margin: 0; padding: 8px 10px; background: rgba(0,0,0,.35); border-radius: 8px; font: 11.5px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; user-select: text; }
+    pre.out.err { color: #ff8f8f; }
+    .line { display: flex; gap: 8px; } .line .ui-input { flex: 1; min-width: 0; }
+    .sec-h { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--t-sub, #a6a6b3); margin-top: 6px; }
+    .note { font-size: 12px; color: var(--t-muted, #7a7a85); line-height: 1.45; }
+    .chips { display: flex; gap: 6px; }
+    .chip { font-size: 12px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--t-line, #2c2c33); background: transparent; color: var(--t-sub, #a6a6b3); cursor: pointer; }
+    .chip.on { background: var(--t-accent, #a85cd6); border-color: transparent; color: var(--t-accent-ink, #fff); }
+    /* The guide */
+    #guide { font-size: 14px; line-height: 1.55; user-select: text; }
+    #guide h1 { font-size: 20px; margin: 4px 0 8px; } #guide h2 { font-size: 16px; margin: 18px 0 6px; } #guide h3 { font-size: 14px; margin: 12px 0 4px; }
+    #guide p { margin: 0 0 8px; } #guide ul, #guide ol { margin: 4px 0 10px; padding-left: 22px; }
+    #guide code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: rgba(255,255,255,.07); padding: 0 4px; border-radius: 4px; }
+    #guide pre { margin: 6px 0 12px; padding: 10px 12px; background: rgba(0,0,0,.35); border: 1px solid var(--t-line, #2c2c33); border-radius: 10px; overflow-x: auto; }
+    #guide pre code { background: none; padding: 0; font-size: 12px; white-space: pre; }
+    #guide .tbl { overflow-x: auto; margin: 6px 0 12px; } #guide table { border-collapse: collapse; font-size: 12.5px; }
+    #guide th, #guide td { border: 1px solid var(--t-line, #2c2c33); padding: 4px 8px; text-align: left; vertical-align: top; }
+    #guide th { background: rgba(255,255,255,.05); }
+    #guide blockquote { margin: 6px 0 10px; padding: 6px 12px; border-left: 3px solid var(--t-accent, #a85cd6); color: var(--t-sub, #c9c9d3); }
+    #guide hr { border: 0; border-top: 1px solid var(--t-line, #2c2c33); margin: 16px 0; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="head">
+      <span class="ico">⧉</span>
+      <div class="ht"><div id="title">Tool packages</div><div id="sub">tools for Jarvis, in any language</div></div>
+    </div>
+    <div class="tabs" id="tabs">
+      <button data-v="installed" class="on">Installed</button>
+      <button data-v="add">Add</button>
+      <button data-v="guide">Guide</button>
+    </div>
+    <div id="v-installed" class="view show"></div>
+    <div id="v-add" class="view"></div>
+    <div id="v-guide" class="view"><div id="guide"></div></div>
+  </div>
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const API = "/api/jarvis/";
+    const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+    const getJ = (p) => fetch(API + p).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
+    const postJ = (p, b) => fetch(API + p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b || {}) }).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
+    const kbMsg = (on) => { try { parent.postMessage({ type: "y70:keyboard", on }, "*"); } catch (e) {} };
+    const kb = (i) => { i.addEventListener("focus", () => kbMsg(true)); i.addEventListener("blur", () => kbMsg(false)); return i; };
+    let data = { installed: [], examples: [], dir: "" };
+    const open = new Set();          // packages with their test/log box open
+    const tests = {};                // name -> { tool, input, out, err }: kept across redraws
+
+    function setView(v) {
+      document.querySelectorAll(".view").forEach((x) => x.classList.toggle("show", x.id === "v-" + v));
+      document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.v === v));
+      if (v === "guide" && !$("#guide").firstChild) loadGuide();
+    }
+    $("#tabs").addEventListener("click", (e) => { const b = e.target.closest("button[data-v]"); if (b) setView(b.dataset.v); });
+
+    async function load() {
+      const r = await getJ("packages");
+      if (r.ok) data = r;
+      const on = data.installed.filter((p) => p.enabled).length;
+      $("#sub").textContent = data.installed.length ? on + " on · " + data.installed.length + " installed · " + data.installed.filter((p) => p.enabled).reduce((n, p) => n + p.tools.length, 0) + " tools for Jarvis" : "tools for Jarvis, in any language";
+      drawInstalled();
+      drawAdd();
+    }
+
+    // Opening a package's folder as a project in Jarvis Code.
+    function editInCode(dir) {
+      try { localStorage.setItem("jcode.project", JSON.stringify(dir)); } catch (e) {}
+      try { new BroadcastChannel("jcode").postMessage({ open: dir }); } catch (e) {}
+      try { parent.setApp("code"); } catch (e) {}
+    }
+
+    function drawInstalled() {
+      const box = $("#v-installed");
+      box.innerHTML = "";
+      if (!data.installed.length) {
+        box.appendChild(el("div", "note", "No packages yet. <b>Add</b> has two examples to start from and a template for your own, or ask Jarvis: “make me a tool package that…”. The <b>Guide</b> explains how they work."));
+        return;
+      }
+      for (const p of data.installed) {
+        const state = p.problems.length ? ["bad", "problem"] : p.changed ? ["warn", "changed"] : p.enabled ? ["on", "on"] : ["", "off"];
+        const c = el("div", "card" + (p.enabled ? " on" : p.changed || p.problems.length ? " warn" : ""));
+        c.appendChild(el("div", "top", '<span class="nm">' + esc(p.name) + '</span><span class="ver">' + esc(p.version) + (p.author ? " · " + esc(p.author) : "") + '</span><span class="badge ' + state[0] + '">' + state[1] + (p.running ? " · running" : "") + "</span>"));
+        if (p.description) c.appendChild(el("div", "desc", esc(p.description)));
+        c.appendChild(el("div", "tools", p.tools.map((t) => '<span class="tool" title="' + esc(t.description) + '">' + esc(t.name) + "</span>").join("")));
+        if (p.changed) c.appendChild(el("div", "prob", "Its files changed since you switched it on, so it's off. Look over what changed, then switch it on again."));
+        for (const pr of p.problems) c.appendChild(el("div", "prob", "⚠ " + esc(pr)));
+        if (p.lastError) c.appendChild(el("div", "prob", "Last error: " + esc(p.lastError)));
+        c.appendChild(el("div", "meta", "Runs " + esc(p.run.join(" ")) + (p.permissions.length ? " · touches " + esc(p.permissions.join(", ")) : "") + " · " + p.calls + " calls since start · " + esc(p.dir)));
+        const btns = el("div", "btns");
+        const b = (text, cls, fn) => { const x = el("button", "btn btn--sm " + (cls || "btn--ghost"), text); x.addEventListener("click", fn); btns.appendChild(x); return x; };
+        if (p.enabled) b("Switch off", "btn--ghost", async () => { await postJ("packages/" + p.name + "/disable"); load(); });
+        else if (!p.problems.length) b(p.changed ? "Switch on again" : "Switch on", "btn--primary", async () => {
+          const r = await postJ("packages/" + p.name + "/enable");
+          if (!r.ok) alert(r.error);
+          load();
+        });
+        b(open.has(p.name) ? "Close" : "Test & log", "btn--ghost", () => { open.has(p.name) ? open.delete(p.name) : open.add(p.name); drawInstalled(); });
+        b("Edit in Jarvis Code", "btn--ghost", () => editInCode(p.dir));
+        let armed = 0;
+        const rm = b("Remove", "btn--ghost", async () => {
+          if (Date.now() - armed > 4000) { armed = Date.now(); rm.textContent = "Tap again: to the Recycle Bin"; setTimeout(() => { rm.textContent = "Remove"; }, 4000); return; }
+          const r = await postJ("packages/" + p.name + "/remove");
+          if (!r.ok) alert(r.error);
+          load();
+        });
+        c.appendChild(btns);
+        if (open.has(p.name)) c.appendChild(testBox(p));
+        box.appendChild(c);
+      }
+      box.appendChild(el("div", "note", "Folder: " + esc(data.dir) + ". A package runs as you: switch on only what you trust. Switching on approves its files as they are now; if they change, it turns itself off until you switch it on again."));
+    }
+
+    function testBox(p) {
+      const st = tests[p.name] || (tests[p.name] = { tool: (p.tools[0] || {}).name, input: "{}", out: "", err: false });
+      const box = el("div", "box");
+      const sel = el("select", "ui-input");
+      for (const t of p.tools) sel.appendChild(el("option", null, esc(t.name)));
+      sel.value = st.tool;
+      sel.addEventListener("change", () => { st.tool = sel.value; });
+      const inp = kb(el("textarea", "ui-input"));
+      inp.value = st.input;
+      inp.placeholder = "Input as JSON, e.g. {\"notation\": \"2d6\"}";
+      inp.addEventListener("input", () => { st.input = inp.value; });
+      const out = el("pre", "out" + (st.err ? " err" : ""), esc(st.out));
+      const show = (text, err) => { st.out = text; st.err = !!err; out.className = "out" + (err ? " err" : ""); out.textContent = text; };
+      const row = el("div", "btns");
+      const run = el("button", "btn btn--primary btn--sm", "Run test");
+      run.addEventListener("click", async () => {
+        let input;
+        try { input = JSON.parse(inp.value || "{}"); } catch (e) { show("That isn't valid JSON: " + e.message, true); return; }
+        run.disabled = true; show("Running…");
+        const r = await postJ("packages/" + p.name + "/test", { tool: sel.value, input });
+        run.disabled = false;
+        show((r.output || r.error || "") + (r.logs && r.logs.length ? "\n\n— log —\n" + r.logs.join("\n") : ""), !r.ok);
+        load();
+      });
+      const lg = el("button", "btn btn--ghost btn--sm", "Show log");
+      lg.addEventListener("click", async () => { const r = await getJ("packages/" + p.name + "/logs"); show((r.logs || []).join("\n") || "(nothing logged yet: it starts on its first call)"); });
+      const rs = el("button", "btn btn--ghost btn--sm", "Restart");
+      rs.addEventListener("click", async () => { await postJ("packages/" + p.name + "/restart"); show("Stopped; it starts again on the next call."); load(); });
+      row.append(run, lg, rs);
+      box.append(el("div", "note", "Testing runs the package's code, switched on or not."), sel, inp, row, out);
+      return box;
+    }
+
+    function drawAdd() {
+      const box = $("#v-add");
+      if (box.contains(document.activeElement)) return;
+      box.innerHTML = "";
+      // New, from the template.
+      box.appendChild(el("div", "sec-h", "New package"));
+      const nn = kb(el("input", "ui-input")); nn.placeholder = "name, like currency-convert";
+      const nd = kb(el("input", "ui-input")); nd.placeholder = "What it does, in a sentence";
+      let lang = "node";
+      const langs = el("div", "chips");
+      for (const [v, l] of [["node", "Node"], ["python", "Python"]]) {
+        const c = el("button", "chip" + (v === lang ? " on" : ""), l);
+        c.addEventListener("click", () => { lang = v; langs.querySelectorAll(".chip").forEach((x) => x.classList.toggle("on", x === c)); });
+        langs.appendChild(c);
+      }
+      const nb = el("button", "btn btn--primary btn--sm", "Create");
+      const nmsg = el("div", "note", "It starts as a template that answers “Not built yet”. Write the code yourself, or open it in Jarvis Code and ask him to.");
+      nb.addEventListener("click", async () => {
+        const r = await postJ("packages/create", { name: nn.value.trim(), description: nd.value.trim(), language: lang });
+        if (!r.ok) { nmsg.textContent = r.error; return; }
+        nmsg.innerHTML = "Made <b>" + esc(r.name) + "</b> in " + esc(r.dir) + ". ";
+        const ed = el("button", "btn btn--ghost btn--sm", "Edit in Jarvis Code");
+        ed.addEventListener("click", () => editInCode(r.dir));
+        nmsg.appendChild(ed);
+        nn.value = ""; nd.value = "";
+        load();
+      });
+      const r1 = el("div", "line"); r1.append(nn);
+      const r2 = el("div", "line"); r2.append(nd);
+      const r3 = el("div", "btns"); r3.append(langs, nb);
+      box.append(r1, r2, r3, nmsg);
+      // The examples.
+      box.appendChild(el("div", "sec-h", "Examples"));
+      for (const ex of data.examples) {
+        const c = el("div", "card");
+        c.appendChild(el("div", "top", '<span class="nm">' + esc(ex.name) + '</span><span class="ver">' + esc(ex.run.join(" ")) + "</span>" + (ex.installed ? '<span class="badge">installed</span>' : "")));
+        c.appendChild(el("div", "desc", esc(ex.description)));
+        c.appendChild(el("div", "tools", ex.tools.map((t) => '<span class="tool">' + esc(t) + "</span>").join("")));
+        if (!ex.installed) {
+          const ib = el("button", "btn btn--ghost btn--sm", "Install");
+          ib.addEventListener("click", async () => { const r = await postJ("packages/install", { source: ex.name }); if (!r.ok) alert(r.error); load(); setView("installed"); });
+          const bb = el("div", "btns"); bb.appendChild(ib); c.appendChild(bb);
+        }
+        box.appendChild(c);
+      }
+      // From somewhere else.
+      box.appendChild(el("div", "sec-h", "Install from a folder or git"));
+      const src = kb(el("input", "ui-input")); src.placeholder = "C:\\path\\to\\package  or  https://github.com/you/package.git";
+      const sb = el("button", "btn btn--ghost btn--sm", "Install");
+      const smsg = el("div", "note", "It is copied (or cloned) into the packages folder, switched off. Read its code before you switch it on.");
+      sb.addEventListener("click", async () => {
+        smsg.textContent = "Installing…";
+        const r = await postJ("packages/install", { source: src.value.trim() });
+        smsg.textContent = r.ok ? "Installed " + r.name + ". It's off: switch it on in Installed after reading it." : r.error;
+        if (r.ok) { src.value = ""; load(); }
+      });
+      const r4 = el("div", "line"); r4.append(src, sb);
+      box.append(r4, smsg);
+    }
+
+    // The guide, docs/PACKAGES.md, drawn from markdown.
+    const inline = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/(^|[\s(])\*([^*\s][^*]*)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>").replace(/\[([^\]]+)\]\(#[^)]*\)/g, "$1");
+    function md(text) {
+      const out = [];
+      let list = null, code = null, table = null, para = [], fence = 0;
+      const endPara = () => { if (para.length) { out.push("<p>" + inline(para.join(" ")) + "</p>"); para = []; } };
+      const endList = () => { if (list) { out.push("</" + list + ">"); list = null; } };
+      const endTable = () => { if (table) { out.push(table.join("") + "</tbody></table></div>"); table = null; } };
+      for (const raw of String(text || "").split(/\r?\n/)) {
+        // A code block keeps its indentation, less the fence's own (in a list item).
+        if (code) { if (/^\s*```/.test(raw)) { out.push("<pre><code>" + esc(code.join("\n")) + "</code></pre>"); code = null; } else code.push(raw.slice(Math.min(fence, raw.match(/^ */)[0].length))); continue; }
+        const t = raw.trim();
+        if (/^```/.test(t)) { endPara(); if (!/^\s/.test(raw)) endList(); endTable(); code = []; fence = raw.match(/^ */)[0].length; continue; }
+        if (/^\|.*\|$/.test(t)) {
+          endPara(); endList();
+          const cells = t.slice(1, -1).split("|").map((c) => c.trim());
+          if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue;
+          if (!table) table = ['<div class="tbl"><table><thead><tr>' + cells.map((c) => "<th>" + inline(c) + "</th>").join("") + "</tr></thead><tbody>"];
+          else table.push("<tr>" + cells.map((c) => "<td>" + inline(c) + "</td>").join("") + "</tr>");
+          continue;
+        }
+        endTable();
+        if (/^---+$/.test(t)) { endPara(); endList(); out.push("<hr>"); continue; }
+        const h = t.match(/^(#{1,3})\s+(.*)$/);
+        if (h) { endPara(); endList(); out.push("<h" + h[1].length + ">" + inline(h[2]) + "</h" + h[1].length + ">"); continue; }
+        if (/^>\s?/.test(t)) { endPara(); endList(); out.push("<blockquote>" + inline(t.replace(/^>\s?/, "")) + "</blockquote>"); continue; }
+        const ul = t.match(/^[-*]\s+(.*)$/), ol = t.match(/^\d+\.\s+(.*)$/);
+        if (ul || ol) { endPara(); const k = ul ? "ul" : "ol"; if (list !== k) { endList(); list = k; out.push("<" + k + ">"); } out.push("<li>" + inline((ul || ol)[1]) + "</li>"); continue; }
+        if (!t) { endPara(); endList(); continue; }
+        // A list item running on to the next line.
+        if (list && /^\s{2,}/.test(raw)) { out[out.length - 1] = out[out.length - 1].replace(/<\/li>$/, " " + inline(t) + "</li>"); continue; }
+        endList();
+        para.push(t);
+      }
+      endPara(); endList(); endTable();
+      return out.join("");
+    }
+    async function loadGuide() {
+      const r = await getJ("packages/docs");
+      $("#guide").innerHTML = md(r.markdown || "The guide is missing.");
+    }
+
+    // Changes made by Jarvis (or another window) show up here.
+    (function connect() {
+      const es = new EventSource(API + "events");
+      es.onmessage = (m) => { let ev; try { ev = JSON.parse(m.data); } catch (e) { return; } if (ev.type === "packages") load(); };
+      es.onerror = () => { es.close(); setTimeout(connect, 3000); };
+    })();
+    load();
+  </script>
+</body>
+</html>

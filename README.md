@@ -119,10 +119,30 @@ box to type into instead.
    `voices-v1.0.bin`. The Windows voices are the fallback whenever Kokoro is
    missing or fails.
 
-   **Or a cloned voice: Qwen3-TTS** (Settings → Jarvis → Voice → *Qwen3 ·
-   cloned voice*; `tts-qwen.py`). He speaks in the voice of a short clip, using
-   a Qwen3-TTS *Base* model (Apache-2.0): `Qwen3-TTS-12Hz-0.6B-Base` (2.5 GB,
-   about 3 GB of VRAM) or `-1.7B-Base` (4.5 GB, about 5 GB). It runs through
+   **Or Qwen3-TTS** (Settings → Jarvis → Voice → *Qwen3 · cloned or stock*;
+   `tts-qwen.py`, Apache-2.0 models), in one of two ways:
+
+   - **Cloned voice**: he speaks in the voice of a short clip, with a *Base*
+     model, `Qwen3-TTS-12Hz-0.6B-Base` (2.5 GB, about 3 GB of VRAM) or
+     `-1.7B-Base` (4.5 GB, about 5 GB). The clips are a library: the JARVIS
+     sample, and any voice you **design**.
+   - **Stock voices**: the nine speakers built into the *CustomVoice* models
+     (`-0.6B-CustomVoice` 2.5 GB, `-1.7B-CustomVoice` 4.5 GB): Ryan and Aiden
+     (English men), Serena, Vivian, Uncle Fu, Dylan (Beijing) and Eric
+     (Sichuan) in Chinese, Ono Anna (Japanese), Sohee (Korean). Each speaks
+     all ten supported languages. The speaker is sent with every sentence, so
+     changing it is instant (no reload). The 1.7B also takes a **style**
+     ("calm and low", "dry and precise", "cheerful").
+   - **Design a voice**: describe one ("a calm, dry British man in his
+     forties, a little wry") and `Qwen3-TTS-12Hz-1.7B-VoiceDesign` (4.5 GB)
+     invents it. It says a few sentences in it and saves them as a clip in
+     the library, with its words, which is then cloned. The design model
+     alone doesn't keep a voice the same from one sentence to the next;
+     cloning its clip does. It takes about 30 s, and the speaking voice steps
+     aside for it (measured: two of these on the GPU at once fail with CUDA
+     "out of memory" while 14.7 GB is free). Kokoro speaks meanwhile.
+
+   It runs through
    [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts), which
    captures the model's decode loop in CUDA graphs. Measured on the RTX 4080
    SUPER, the plain `qwen-tts` package made speech at 0.4× real time (a
@@ -139,13 +159,14 @@ box to type into instead.
      cu124 index. It needs its own because `qwen-tts` pins
      `transformers==4.57.3`, and the system torchvision 0.20.1 does not match
      torch 2.6.
-   - `Qwen3-TTS-12Hz-0.6B-Base\`, `Qwen3-TTS-12Hz-1.7B-Base\`: the models,
-     each with its speech tokenizer inside.
-   - `voices\jarvis.mp3` and `voices\jarvis.txt`: the clip to clone and its
-     exact words (cloning needs both; Whisper wrote them). Any clip works:
-     point *Voice clip to clone* at it with a `.txt` of its words beside it.
-     A clip of a real person's voice stays out of the repo (`samplevoice/` is
-     ignored).
+   - `Qwen3-TTS-12Hz-{0.6B,1.7B}-Base\`, `-{0.6B,1.7B}-CustomVoice\`,
+     `-1.7B-VoiceDesign\`: the models, each with its speech tokenizer inside.
+     Settings marks a size that isn't downloaded.
+   - `voices\`: the library. `jarvis.mp3` with `jarvis.txt` (its exact words;
+     cloning needs both, and Whisper wrote them), and every designed voice
+     (`<name>.wav` + `<name>.txt`). Any clip works: drop it in with a `.txt`
+     of its words, or point *Or any clip* at it. A clip of a real person's
+     voice stays out of the repo (`samplevoice/` is ignored).
 
    Each sentence is capped at about twice its expected length, so a sampled
    long pause can't run on. The speed slider doesn't apply to it.
@@ -304,6 +325,41 @@ ProgramData\Microsoft, never touches a whole drive or your whole user folder,
 and never opens the panel's own keys (Claude, Govee, Discord). A read of a big
 file is cut to what the model can take (about 9,000 characters for the local
 model, 30,000 for Claude) and continues from a line on request.
+
+### Tool packages
+
+Tools for Jarvis that live outside the dashboard's code
+(`assistant-packages.js`; **the guide to making them is
+[docs/PACKAGES.md](docs/PACKAGES.md)**, also on the Packages app's *Guide*
+tab, and Jarvis reads it before he builds one). A package is a folder with a
+`jarvis-package.json` manifest (its tools, each with a JSON schema, and the
+command that runs it) and a program in any language: Node (the dashboard's
+own), Python, PowerShell, or an exe inside the package. It talks JSON lines
+over stdin and stdout. Installed packages live in
+`%APPDATA%\y70-dashboard\jarvis-packages\`; two examples ship in
+`packages-examples/` (`dice` in Node, `text-tools` in Python).
+
+- **Packages app**: what is installed, on or off, with problems (a bad
+  manifest, a tool name that clashes with Jarvis's own) and a log. Switch
+  on/off, **Test** any tool with JSON input (on or off), restart, *Edit in
+  Jarvis Code*, remove (to the Recycle Bin). *Add*: a new package from the
+  Node or Python template, the examples, or install from a folder or a git
+  URL.
+- **Jarvis** has a `packages` tool: list, guide, create (from the template;
+  then he writes the code with the files tool), test, enable, disable,
+  install, logs. Enabled packages' tools are his, in the "which tool" list
+  with the line their manifest gives.
+- **Each package is its own process**, started on its first call and stopped
+  after ten idle minutes. A call that times out (the manifest's `timeout`,
+  default 60 s) fails, and the process restarts. A crash fails the call,
+  never Jarvis.
+- **Nothing runs until you say so**:
+  - **Switching on records a fingerprint** of every file. If anything changes
+    afterwards (you, Jarvis or an update), the package is off and marked
+    *changed* until you switch it on again.
+  - **Jarvis can never switch one on, test it, or install one without your
+    tap**, whatever the Files setting, even *Bypass*. Those prompts have no
+    *Allow for this chat*.
 
 ### Jarvis Code
 
@@ -1334,6 +1390,10 @@ wscript "autostart-hidden.vbs" 0
 | `tts-kokoro.py` | Jarvis's voice: Kokoro-82M, resident, one WAV per sentence |
 | `tts-qwen.py` | Jarvis's cloned voice: Qwen3-TTS through faster-qwen3-tts, resident on the GPU |
 | `app-code.html` | Jarvis Code: projects, a coding chat with every step shown, files, git changes |
+| `assistant-packages.js` | Tool packages: finding, fingerprinting, running (one process each) and managing them |
+| `app-packages.html` | Packages: switch on/off, test, log, install, new from a template, and the guide |
+| `docs/PACKAGES.md` | The guide to making tool packages |
+| `packages-examples/` | Two example packages: `dice` (Node), `text-tools` (Python) |
 | `jarvis.js` / `jarvis.css` | Status bar, the island, alarms + timers, Jarvis's card and settings |
 | `voice/Program.cs` | Voice helper — wake word, online/offline dictation, voices, game probe |
 | `index.html` | UI layout |

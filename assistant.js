@@ -32,6 +32,7 @@ const chats = require("./assistant-chats");
 const memory = require("./assistant-memory");
 const usage = require("./assistant-usage");
 const fileTools = require("./assistant-files");
+const packages = require("./assistant-packages");
 const govee = require("./govee");
 const discord = require("./discord");
 
@@ -71,6 +72,9 @@ const DEFAULTS = {
   kokoroVoice: "bm_george",
   qwenDir: "",                      // Qwen3-TTS: qwen3-venv\ + Qwen3-TTS-12Hz-<size>-Base\; "" = the Kokoro folder
   qwenModel: "0.6B",                // 0.6B | 1.7B
+  qwenMode: "clone",                // clone (a clip's voice, Base model) | stock (a built-in speaker, CustomVoice model)
+  qwenSpeaker: "ryan",              // stock: aiden dylan eric ono_anna ryan serena sohee uncle_fu vivian
+  qwenStyle: "",                    // stock, 1.7B only: how to speak ("calm and low", "excited")
   qwenVoice: "",                    // the clip to clone, its words in a .txt beside it; "" = <folder>\voices\jarvis.mp3
   qwenGameFree: true,               // unload it while a game is in front (Kokoro speaks meanwhile)
   voice: "Microsoft Mark",          // the Windows voice (fallback)
@@ -112,6 +116,10 @@ function saveSettings(patch) {
   for (const k of ["name", "addressAs", "voice", "localBat", "graphFile", "localUrl", "memoryUrl", "whisperDir", "kokoroDir", "qwenDir", "qwenVoice"]) next[k] = String(next[k] || "").slice(0, 400);
   if (!["", "qwen", "kokoro", "windows"].includes(next.tts)) next.tts = "";
   if (!["0.6B", "1.7B"].includes(next.qwenModel)) next.qwenModel = DEFAULTS.qwenModel;
+  if (!["clone", "stock"].includes(next.qwenMode)) next.qwenMode = DEFAULTS.qwenMode;
+  if (!QWEN_SPEAKERS[String(next.qwenSpeaker || "").toLowerCase()]) next.qwenSpeaker = DEFAULTS.qwenSpeaker;
+  next.qwenSpeaker = String(next.qwenSpeaker).toLowerCase();
+  next.qwenStyle = String(next.qwenStyle || "").slice(0, 300);
   next.qwenGameFree = next.qwenGameFree !== false;
   if (!/^[a-z]{2}_[a-z]+$/.test(String(next.kokoroVoice || ""))) next.kokoroVoice = DEFAULTS.kokoroVoice;
   if (!["", "whisper", "online", "offline"].includes(next.stt)) next.stt = "";
@@ -127,7 +135,8 @@ function saveSettings(patch) {
   if (next.tts !== "windows" && kokoroPaths()) kokoroStart();
   // Qwen restarts for a new model, folder or voice, and stops (freeing its
   // VRAM) when another engine is chosen.
-  if (prev && (prev.qwenModel !== next.qwenModel || prev.qwenDir !== next.qwenDir || prev.qwenVoice !== next.qwenVoice || next.tts !== "qwen")) { qwenStop(); qwen.err = null; }
+  // (A new stock speaker or style needs no restart: each sentence names its own.)
+  if (prev && (prev.qwenModel !== next.qwenModel || prev.qwenDir !== next.qwenDir || prev.qwenMode !== next.qwenMode || (next.qwenMode === "clone" && prev.qwenVoice !== next.qwenVoice) || next.tts !== "qwen")) { qwenStop(); qwen.err = null; }
   if (next.tts === "qwen" && !(game.on && next.qwenGameFree)) qwenStart();
   applyVoiceSettings();
   // Think hard switched off mid-think: stop it and give the router back.
@@ -436,31 +445,120 @@ function ttsEngine() {
 //  makes speech 2.5-3.3x faster than real time (measured: a 4 s sentence in
 //  about 1.2 s). Until it is ready, in a game (if it frees the GPU) or if it
 //  fails, Kokoro speaks instead.
-const qwen = { proc: null, buf: "", ready: false, starting: null, err: null, seq: 0, waiters: new Map(), info: null };
+const qwen = { proc: null, buf: "", ready: false, starting: null, err: null, seq: 0, waiters: new Map(), info: null, design: null };
 
+// The CustomVoice models' own speakers (all of them speak all ten languages;
+// this is the one each was recorded in).
+const QWEN_SPEAKERS = {
+  ryan: "English · man, lively and rhythmic",
+  aiden: "English · American man, bright and clear",
+  serena: "Chinese · woman, warm and gentle",
+  vivian: "Chinese · woman, bright, a little edgy",
+  uncle_fu: "Chinese · older man, low and mellow",
+  dylan: "Chinese (Beijing) · young man, clear",
+  eric: "Chinese (Sichuan) · man, lively, a little husky",
+  ono_anna: "Japanese · woman, playful and light",
+  sohee: "Korean · woman, warm and expressive",
+};
+const VOICE_EXT = /\.(mp3|wav|flac|m4a|ogg)$/i;
+
+function qwenDir() { return settings.qwenDir || settings.kokoroDir || ""; }
 function qwenPaths() {
-  const dir = settings.qwenDir || settings.kokoroDir;
+  const dir = qwenDir();
   if (!dir) return null;
   const python = path.join(dir, "qwen3-venv", "Scripts", "python.exe");
-  const model = path.join(dir, "Qwen3-TTS-12Hz-" + settings.qwenModel + "-Base");
+  const stock = settings.qwenMode === "stock";
+  const model = path.join(dir, "Qwen3-TTS-12Hz-" + settings.qwenModel + "-" + (stock ? "CustomVoice" : "Base"));
+  if (![python, path.join(model, "config.json")].every((p) => fs.existsSync(p))) return null;
+  if (stock) return { dir, python, model, mode: "stock" };
   const voice = settings.qwenVoice || path.join(dir, "voices", "jarvis.mp3");
   const words = voice.replace(/\.[^.\\/]+$/, "") + ".txt";
-  if (![python, path.join(model, "config.json"), voice, words].every((p) => fs.existsSync(p))) return null;
-  return { dir, python, model, voice, words };
+  if (![voice, words].every((p) => fs.existsSync(p))) return null;
+  return { dir, python, model, mode: "clone", voice, words };
+}
+
+// The voice library: every clip in <folder>\voices with its words beside it
+// (the JARVIS sample, and the voices designed from a description).
+function qwenVoices() {
+  const vd = path.join(qwenDir(), "voices");
+  let names = [];
+  try { names = fs.readdirSync(vd).filter((f) => VOICE_EXT.test(f)); } catch (e) { return []; }
+  return names.map((f) => {
+    const p = path.join(vd, f);
+    const words = p.replace(/\.[^.\\/]+$/, "") + ".txt";
+    let text = "";
+    try { text = fs.readFileSync(words, "utf8").trim(); } catch (e) {}
+    return { name: f.replace(VOICE_EXT, ""), path: p, words: text, ready: !!text };
+  });
+}
+
+// "Design a voice": the VoiceDesign model invents one from a description,
+// says a few sentences in it, and the clip joins the library. Once only;
+// cloning that clip then keeps the voice steady.
+function qwenDesign(name, description, text) {
+  if (qwen.design) return { ok: false, error: "Already designing one." };
+  const dir = qwenDir();
+  const python = path.join(dir, "qwen3-venv", "Scripts", "python.exe");
+  const model = path.join(dir, "Qwen3-TTS-12Hz-1.7B-VoiceDesign");
+  if (!fs.existsSync(python) || !fs.existsSync(path.join(model, "config.json"))) return { ok: false, error: "The VoiceDesign model isn't in " + dir + "." };
+  const safe = String(name || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  if (!safe) return { ok: false, error: "Give the voice a name." };
+  const desc = String(description || "").trim().slice(0, 500);
+  if (desc.length < 8) return { ok: false, error: "Describe the voice: who, age, accent, how they sound." };
+  const vd = path.join(dir, "voices");
+  fs.mkdirSync(vd, { recursive: true });
+  const out = path.join(vd, safe + ".wav");
+  if (fs.existsSync(out)) return { ok: false, error: "There is already a voice called " + safe + "." };
+  const say = String(text || "").trim().slice(0, 400) || "Good evening. All systems are online, and I'm ready whenever you are. Shall I start with the weather, or would you like the news first?";
+  // Two of these on the GPU at once fail (measured: CUDA "out of memory" with
+  // 14.7 GB free while the speaking voice was loaded). So the speaking voice
+  // steps aside for the minute it takes (Kokoro speaks) and comes back after.
+  const resume = !!(qwen.proc || qwen.starting);
+  qwenStop();
+  qwen.design = { name: safe, started: Date.now() };
+  broadcast({ type: "voice-design", state: "started", name: safe });
+  const child = spawn(python, [path.join(H.ROOT, "tts-qwen.py"), JSON.stringify({ mode: "design", model, instruct: desc, text: say, out })], {
+    cwd: dir, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8", USE_TF: "0", TRANSFORMERS_NO_TF: "1", HF_HUB_OFFLINE: "1" },
+  });
+  let buf = "", result = null;
+  child.stdout.on("data", (d) => {
+    buf += d.toString();
+    for (const line of buf.split("\n").slice(0, -1)) {
+      if (!line.trim().startsWith("{")) continue;
+      try { const m = JSON.parse(line); if (m.type === "designed" || m.type === "error") result = m; } catch (e) {}
+    }
+    buf = buf.slice(buf.lastIndexOf("\n") + 1);
+  });
+  child.stderr.on("data", () => {});
+  const timer = setTimeout(() => { try { child.kill(); } catch (e) {} }, 5 * 60 * 1000);
+  child.on("exit", () => {
+    clearTimeout(timer);
+    const ok = result && result.type === "designed" && fs.existsSync(out);
+    broadcast({ type: "voice-design", state: ok ? "done" : "failed", name: safe, path: ok ? out : null, error: ok ? null : (result && result.error) || "it stopped without a voice", seconds: result && result.seconds });
+    qwen.design = null;
+    if (resume && settings.tts === "qwen" && !(game.on && settings.qwenGameFree)) qwenStart();
+  });
+  return { ok: true, name: safe, path: out };
 }
 
 function qwenStart() {
   if (qwen.ready) return Promise.resolve(true);
+  if (qwen.design) return Promise.resolve(false);     // the GPU is designing a voice; it comes back after
   if (qwen.starting) return qwen.starting;
   const p = qwenPaths();
   if (!p) return Promise.resolve(false);
+  const cfg = p.mode === "stock"
+    ? { mode: "stock", model: p.model, speaker: settings.qwenSpeaker }
+    : { mode: "clone", model: p.model, ref: p.voice, words: p.words };
   qwen.starting = new Promise((resolve) => {
-    const child = spawn(p.python, [path.join(H.ROOT, "tts-qwen.py"), p.model, p.voice, p.words], {
+    const child = spawn(p.python, [path.join(H.ROOT, "tts-qwen.py"), JSON.stringify(cfg)], {
       cwd: p.dir, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8", USE_TF: "0", TRANSFORMERS_NO_TF: "1", HF_HUB_OFFLINE: "1" },
     });
     qwen.proc = child;
+    const waiters = qwen.waiters = new Map();
     const timer = setTimeout(() => { qwen.err = "Qwen3-TTS took too long to load"; resolve(false); }, 180000);
     child.stdout.on("data", (d) => {
+      if (qwen.proc !== child) return;
       qwen.buf += d.toString();
       let i;
       while ((i = qwen.buf.indexOf("\n")) >= 0) {
@@ -470,7 +568,7 @@ function qwenStart() {
         let m;
         try { m = JSON.parse(line); } catch (e) { continue; }
         if (m.type === "ready") {
-          qwen.ready = true; qwen.err = null; qwen.info = { model: m.model, loadSeconds: m.loadSeconds, vramGB: m.vramGB };
+          qwen.ready = true; qwen.err = null; qwen.info = { model: m.model, mode: m.mode, loadSeconds: m.loadSeconds, vramGB: m.vramGB, speakers: m.speakers || [] };
           clearTimeout(timer); resolve(true);
           broadcast({ type: "status", status: status() });
         } else if (m.type === "error") {
@@ -486,10 +584,12 @@ function qwenStart() {
     });
     child.stderr.on("data", () => {});
     child.on("error", (e) => { qwen.err = /ENOENT/.test(e.code || "") ? "unavailable" : e.message; clearTimeout(timer); resolve(false); });
+    // A replaced helper exiting late leaves the new one alone (switching
+    // speaker modes stops one and starts the next at once).
     child.on("exit", () => {
-      qwen.proc = null; qwen.ready = false; qwen.buf = "";
-      for (const [, w] of qwen.waiters) w({ error: "qwen exited" });
-      qwen.waiters.clear();
+      if (qwen.proc === child) { qwen.proc = null; qwen.ready = false; qwen.buf = ""; }
+      for (const [, w] of waiters) w({ error: "qwen exited" });
+      waiters.clear();
       broadcast({ type: "status", status: status() });
     });
   }).finally(() => { qwen.starting = null; });
@@ -509,7 +609,8 @@ function qwenSpeak(text) {
     const timer = setTimeout(() => { qwen.waiters.delete(id); resolve({ error: "timed out" }); }, 30000);
     qwen.waiters.set(id, (m) => { clearTimeout(timer); resolve(m); });
     try {
-      const line = JSON.stringify({ id, text: String(text).slice(0, 2000) })
+      // A stock speaker (and, on the 1.7B, a style) rides on each sentence.
+      const line = JSON.stringify({ id, text: String(text).slice(0, 2000), speaker: settings.qwenSpeaker, instruct: settings.qwenModel === "1.7B" ? settings.qwenStyle : "" })
         .replace(/[\u007f-￿]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
       qwen.proc.stdin.write(line + "\n");
     } catch (e) { qwen.waiters.delete(id); clearTimeout(timer); resolve({ error: e.message }); }
@@ -524,8 +625,10 @@ function kokoroStart() {
   kokoro.starting = new Promise((resolve) => {
     const child = spawn("python", [path.join(H.ROOT, "tts-kokoro.py"), p.model, p.voices], { cwd: H.ROOT, windowsHide: true });
     kokoro.proc = child;
+    const waiters = kokoro.waiters = new Map();
     const timer = setTimeout(() => { kokoro.err = "Kokoro took too long to start"; resolve(false); }, 30000);
     child.stdout.on("data", (d) => {
+      if (kokoro.proc !== child) return;
       kokoro.buf += d.toString();
       let i;
       while ((i = kokoro.buf.indexOf("\n")) >= 0) {
@@ -552,9 +655,9 @@ function kokoroStart() {
     child.stderr.on("data", () => {});
     child.on("error", (e) => { kokoro.err = /ENOENT/.test(e.code || "") ? "unavailable" : e.message; clearTimeout(timer); resolve(false); });
     child.on("exit", () => {
-      kokoro.proc = null; kokoro.ready = false; kokoro.buf = "";
-      for (const [, w] of kokoro.waiters) w({ error: "kokoro exited" });
-      kokoro.waiters.clear();
+      if (kokoro.proc === child) { kokoro.proc = null; kokoro.ready = false; kokoro.buf = ""; }
+      for (const [, w] of waiters) w({ error: "kokoro exited" });
+      waiters.clear();
     });
   }).finally(() => { kokoro.starting = null; });
   return kokoro.starting;
@@ -593,17 +696,19 @@ function speechText(t) {
 async function speak(text) {
   text = speechText(text);
   const engine = ttsEngine();
+  // Each answer says which engine spoke (the panel's /tts puts it in a header).
   if (engine === "qwen") {
     if (qwen.ready) {
       const r = await qwenSpeak(text);
-      if (r && r.data) return r;
+      if (r && r.data) return { ...r, engine: "qwen" };
     } else if (!qwen.starting && !qwen.err) qwenStart();
   }
   if (engine === "kokoro" || (engine === "qwen" && kokoroPaths())) {
     const r = await kokoroSpeak(text);
-    if (r && r.data) return r;
+    if (r && r.data) return { ...r, engine: "kokoro" };
   }
-  return speakWindows(text);
+  const w = await speakWindows(text);
+  return w && w.data ? { ...w, engine: "windows" } : w;
 }
 
 function speakWindows(text) {
@@ -645,8 +750,12 @@ function status() {
       voices: kokoro.voices, error: kokoro.err,
       qwen: (() => {
         const p = qwenPaths();
+        const has = (kind, size) => fs.existsSync(path.join(qwenDir(), "Qwen3-TTS-12Hz-" + size + "-" + kind, "config.json"));
         return { installed: !!p, ready: qwen.ready, loading: !!qwen.starting, error: qwen.err, info: qwen.info,
-          voice: p ? p.voice : null, model: settings.qwenModel, freedForGame: !!(game.on && settings.qwenGameFree && settings.tts === "qwen") };
+          voice: p ? p.voice || null : null, model: settings.qwenModel, mode: settings.qwenMode,
+          freedForGame: !!(game.on && settings.qwenGameFree && settings.tts === "qwen"),
+          models: { base: ["0.6B", "1.7B"].filter((s) => has("Base", s)), stock: ["0.6B", "1.7B"].filter((s) => has("CustomVoice", s)), design: has("VoiceDesign", "1.7B") },
+          speakers: QWEN_SPEAKERS, voices: qwenVoices(), designing: qwen.design };
       })(),
     },
     game,
@@ -1583,6 +1692,20 @@ const TOOLS = [
   },
 ];
 TOOLS.push(...fileTools.TOOL_DEFS);
+TOOLS.push({
+  name: "packages", where: "server", core: true,
+  description: "Tool packages: tools for you that live outside the dashboard, made by the user, by you, or by others. list: what is installed (on or off), and examples that can be installed. guide: the full guide to making one (read it before you build one). create (name: lowercase-with-dashes, description, language: node|python, tools: [{name, description, input_schema}]): a new package from the template; then write its real code with the files tool. test (name, tool, input): run one of its tools. enable (name): switch it on. disable (name). install (source: a folder, an example's name, or a git URL). logs (name). test, enable and install always wait for the user's OK, and a package that changes is off until enabled again.",
+  input_schema: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: ["list", "guide", "create", "test", "enable", "disable", "install", "logs"] },
+      name: { type: "string" }, description: { type: "string" }, language: { type: "string", enum: ["node", "python"] },
+      tools: { type: "array", items: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, input_schema: { type: "object" } }, required: ["name", "description"] } },
+      tool: { type: "string" }, input: { type: "object" }, source: { type: "string" },
+    },
+    required: ["action"],
+  },
+});
 const toolByName = new Map(TOOLS.map((t) => [t.name, t]));
 
 // Tools the user can switch off: think_hard (off by default) and the file
@@ -2286,9 +2409,65 @@ async function runServerTool(name, input, emit, conv) {
       }
       return ["unknown action", true];
     }
-    default:
+    case "packages": return packagesTool(a, emit, conv);
+    default: {
+      // A tool from an enabled package.
+      if (packages.has(name)) {
+        const [out, isErr, card] = await packages.call(name, a, { user: who(), home: os.homedir(), chat: conv && conv.chatId, time: new Date().toISOString() });
+        if (card) emit({ type: "card", card: { kind: "show", title: card.title || "", items: Array.isArray(card.items) ? card.items.slice(0, 12) : [{ text: String(card.text || "") }] } });
+        return [out, isErr];
+      }
       return ["unknown tool " + name, true];
+    }
   }
+}
+
+// ---- tool packages: the model's side -----------------------------------------------------
+// He can list them, read the guide, start one from the template (then write
+// its code with the files tool), test it, and ask for it to be switched on.
+// Running a package's code always waits for your yes, whatever the Files
+// setting, and a changed package is off until you say yes again.
+async function packagesTool(a, emit, conv) {
+  const act = String(a.action || "list");
+  if (act === "list") {
+    packages.scan();
+    const l = packages.list();
+    const ex = packages.examples().filter((e) => !e.installed);
+    return [(l.length ? l.map((p) => "- " + p.name + " " + p.version + " (" + (p.enabled ? "on" : p.changed ? "changed since you enabled it: off until enabled again" : "off") + ")" +
+      ": " + p.description + " Tools: " + p.tools.map((t) => t.name).join(", ") + (p.problems.length ? ". Problems: " + p.problems.join("; ") : "") + ". Folder: " + p.dir).join("\n") : "No packages installed.") +
+      (ex.length ? "\nExamples that can be installed: " + ex.map((e) => e.name + " (" + e.description + ")").join("; ") : "") +
+      "\nPackages folder: " + packages.dir];
+  }
+  if (act === "guide") {
+    const g = packages.docs();
+    const lim = conv && conv.provider === "claude" ? 40000 : 12000;
+    return [g.length > lim ? g.slice(0, lim) + "\n… (the rest of the guide is in docs/PACKAGES.md)" : g];
+  }
+  if (act === "create") {
+    const ok = await askPermission(conv, emit, { tool: "packages", action: "create", write: true, title: "New tool package " + (a.name || ""), path: path.join(packages.dir, String(a.name || "")), detail: (a.description || "") + "\nTools: " + (a.tools || []).map((t) => t.name).join(", ") });
+    if (!ok) return ["The user said no.", true];
+    const r = packages.create({ name: a.name, description: a.description, language: a.language, tools: a.tools, author: who() });
+    if (!r.ok) return [r.error, true];
+    if (conv) conv.fsCwd = r.dir;
+    broadcast({ type: "packages" });
+    return ["Made package " + r.name + " in " + r.dir + " (" + r.files.join(", ") + "). Now write the real code with the files tool (it is a template that says \"Not built yet\"), keep jarvis-package.json's tools in step with it, then test it with packages test, and ask the user to enable it with packages enable."];
+  }
+  const name = String(a.name || "").trim().toLowerCase();
+  if (act === "logs") return [packages.logs(name).slice(-60).join("\n") || "(nothing logged yet)"];
+  if (act === "disable") { packages.disable(name); broadcast({ type: "packages" }); return ["Package " + name + " is off."]; }
+  if (act === "test" || act === "enable" || act === "install") {
+    // Code about to run: always asked, Bypass or not.
+    const what = act === "install" ? "Install tool package from " + (a.source || "") : act === "enable" ? "Switch on tool package " + name + " (its code will run as you)" : "Run " + name + "'s " + (a.tool || "") + " to test it";
+    const pk = packages.list().find((p) => p.name === name);
+    const detail = act === "install" ? String(a.source || "") : pk ? "Runs: " + pk.run.join(" ") + "\nTools: " + pk.tools.map((t) => t.name).join(", ") + (act === "test" ? "\nInput: " + JSON.stringify(a.input || {}) : "") : "";
+    const ok = await askPermission(conv, emit, { tool: "packages", action: act, write: true, always: true, title: what, path: pk ? pk.dir : "", detail });
+    if (!ok) return ["The user said no.", true];
+    if (act === "install") { const r = await packages.install(a.source); broadcast({ type: "packages" }); return r.ok ? ["Installed " + r.name + ". It is off until enabled (packages enable)."] : [r.error, true]; }
+    if (act === "enable") { const r = packages.enable(name); broadcast({ type: "packages" }); return r.ok ? ["Package " + name + " is on; its tools (" + r.package.tools.map((t) => t.name).join(", ") + ") are yours from the next request."] : [r.error, true]; }
+    const [out, isErr] = await packages.test(name, String(a.tool || ""), a.input || {}, { user: who(), home: os.homedir(), test: true });
+    return ["Test result" + (isErr ? " (an error)" : "") + ":\n" + out + "\n\nLog:\n" + packages.logs(name).slice(-15).join("\n"), isErr];
+  }
+  return ["Unknown packages action " + act + ". list, guide, create, test, enable, disable, install, logs.", true];
 }
 
 // ----------------------------------------------------------- system prompt --
@@ -2363,7 +2542,9 @@ function systemPrompt(small) {
   const facts = graphMode() ? [] : loadFacts();
   const graph = graphSummary();
   const have = TOOLS.filter((t) => (!small || t.core) && toolOn(t)).map((t) => t.name);
-  const guide = have.filter((n) => TOOL_GUIDE[n]).map((n) => "- " + n + ": " + TOOL_GUIDE[n]);
+  const guide = have.filter((n) => TOOL_GUIDE[n]).map((n) => "- " + n + ": " + TOOL_GUIDE[n])
+    // Tools from packages say for themselves what they are for.
+    .concat(packages.tools().filter((t) => !small || t.core).map((t) => "- " + t.name + ": " + (t.guide || String(t.description).split(/(?<=\.)\s/)[0]) + " (package " + t.pkg + ")"));
   const examples = TOOL_EXAMPLES
     .filter(([, call]) => have.some((n) => call.startsWith(n + " ")))
     .map(([said, call, then]) => "- \"" + said + "\" -> " + call + (then ? ", " + then : ""));
@@ -2835,7 +3016,7 @@ async function runLoop(conv, emit, signal) {
       const tStart = Date.now();
       let out, isErr = false;
       try {
-        if (!toolByName.has(u.name)) [out, isErr] = ["There is no tool called " + u.name, true];
+        if (!toolByName.has(u.name) && !packages.has(u.name)) [out, isErr] = ["There is no tool called " + u.name, true];
         else if (u.name === "web_search" && ++conv.searches > MAX_SEARCHES) {
           [out, isErr] = ["You have already searched " + MAX_SEARCHES + " times for this question. Do not search again: " +
             "answer now from the results you have (read_page one of them if you need detail), or say you could not find it.", true];
@@ -3025,12 +3206,15 @@ const perms = new Map();          // id -> { resolve, req, conv }
 const PERM_WAIT_MS = 2 * 60 * 1000;
 function askPermission(conv, emit, req) {
   const mode = settings.files;
-  if (mode === "off") return Promise.resolve(false);
-  if (mode === "bypass") return Promise.resolve(true);
-  if (!req.write && mode === "ask") return Promise.resolve(true);
-  if (conv && conv.fsAllow && (conv.fsAllow === "all" || (!req.write && conv.fsAllow === "read"))) return Promise.resolve(true);
+  // req.always: running code (a tool package). No setting skips that question.
+  if (!req.always) {
+    if (mode === "off") return Promise.resolve(false);
+    if (mode === "bypass") return Promise.resolve(true);
+    if (!req.write && mode === "ask") return Promise.resolve(true);
+    if (conv && conv.fsAllow && (conv.fsAllow === "all" || (!req.write && conv.fsAllow === "read"))) return Promise.resolve(true);
+  }
   const id = "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const ev = { type: "permission", id, tool: req.tool, action: req.action, write: !!req.write, title: req.title, path: req.path, detail: String(req.detail || "").slice(0, 1500), at: Date.now(), timeout: PERM_WAIT_MS, source: conv && conv.code ? "code" : "jarvis" };
+  const ev = { type: "permission", id, tool: req.tool, action: req.action, write: !!req.write, title: req.title, path: req.path, detail: String(req.detail || "").slice(0, 1500), at: Date.now(), timeout: PERM_WAIT_MS, source: conv && conv.code ? "code" : "jarvis", always: !!req.always };
   emit({ type: "status", text: "Waiting for your OK on the panel…" });
   emit(ev);
   broadcast(ev);
@@ -3046,7 +3230,7 @@ function settlePermission(id, answer) {
   perms.delete(id);
   clearTimeout(p.timer);
   const ok = answer === "allow" || answer === "always";
-  if (answer === "always" && p.conv) p.conv.fsAllow = "all";
+  if (answer === "always" && p.conv && !p.req.always) p.conv.fsAllow = "all";
   const done = { type: "permission-done", id, answer, allowed: ok };
   try { p.emit(done); p.emit({ type: "status", text: "" }); } catch (e) {}
   broadcast(done);
@@ -3100,10 +3284,11 @@ async function codeProject(root, touch) {
   return { ok: true, ...e };
 }
 
-const CODE_TOOLS = new Set(["files", "repo", "web_search", "read_page"]);
+const CODE_TOOLS = new Set(["files", "repo", "web_search", "read_page", "packages"]);
 function toolsFor(conv, big) {
   if (conv && conv.code) return TOOLS.filter((t) => CODE_TOOLS.has(t.name) && toolOn(t));
-  return TOOLS.filter((t) => (big || t.core) && toolOn(t));
+  // His own, then the enabled packages' (a package tool is core unless it says not).
+  return TOOLS.filter((t) => (big || t.core) && toolOn(t)).concat(packages.tools().filter((t) => big || t.core));
 }
 
 function codeSystemPrompt(conv) {
@@ -3379,12 +3564,19 @@ async function handle(req, res, urlPath) {
     });
   }
 
+  // Design a new voice from a description (it joins the voice library).
+  if (sub === "voices/design" && req.method === "POST") {
+    return H.readJsonBody(req, res, (b) => {
+      const r = qwenDesign(b && b.name, b && b.description, b && b.text);
+      return json(res, r.ok ? 200 : 400, r);
+    });
+  }
   if (sub === "tts" && req.method === "POST") {
     return H.readJsonBody(req, res, async (body) => {
       const r = await speak(String(body.text || ""));
       if (r.error || !r.data) return json(res, 503, { ok: false, error: r.error || "no audio" });
       const buf = Buffer.from(r.data, "base64");
-      res.writeHead(200, { "Content-Type": r.mime || "audio/wav", "Content-Length": buf.length, "Cache-Control": "no-store" });
+      res.writeHead(200, { "Content-Type": r.mime || "audio/wav", "Content-Length": buf.length, "Cache-Control": "no-store", "X-Jarvis-Voice": r.engine || "" });
       return res.end(buf);
     });
   }
@@ -3460,6 +3652,38 @@ async function handle(req, res, urlPath) {
   }
   if (sub === "permissions" && req.method === "GET") {
     return json(res, 200, { ok: true, pending: [...perms].map(([id, p]) => ({ id, ...p.req, detail: String(p.req.detail || "").slice(0, 1500), source: p.conv && p.conv.code ? "code" : "jarvis" })) });
+  }
+
+  // ---- Tool packages: you managing them (a tap here is your yes) -------------------
+  if (sub === "packages" && req.method === "GET") {
+    packages.scan();
+    return json(res, 200, { ok: true, installed: packages.list(), examples: packages.examples(), dir: packages.dir });
+  }
+  if (sub === "packages/docs" && req.method === "GET") return json(res, 200, { ok: true, markdown: packages.docs() });
+  if (sub === "packages/install" && req.method === "POST") {
+    return H.readJsonBody(req, res, async (b) => { const r = await packages.install(b && b.source); broadcast({ type: "packages" }); return json(res, r.ok ? 200 : 400, r); });
+  }
+  if (sub === "packages/create" && req.method === "POST") {
+    return H.readJsonBody(req, res, (b) => { const r = packages.create({ ...(b || {}), author: who() }); broadcast({ type: "packages" }); return json(res, r.ok ? 200 : 400, r); });
+  }
+  const pkm = /^packages\/([a-z][a-z0-9-]{1,39})\/(enable|disable|remove|restart|logs|test)$/.exec(sub);
+  if (pkm) {
+    const [, name, act] = pkm;
+    if (act === "logs" && req.method === "GET") return json(res, 200, { ok: true, logs: packages.logs(name) });
+    if (req.method !== "POST") return json(res, 405, { ok: false });
+    return H.readJsonBody(req, res, async (b) => {
+      let r;
+      if (act === "enable") r = packages.enable(name);
+      else if (act === "disable") r = packages.disable(name);
+      else if (act === "remove") r = await packages.remove(name);
+      else if (act === "restart") { packages.stop(name); r = { ok: true }; }
+      else {
+        const [out, isErr] = await packages.test(name, String((b && b.tool) || ""), (b && b.input) || {}, { user: who(), home: os.homedir(), test: true });
+        r = { ok: !isErr, output: out, logs: packages.logs(name).slice(-30) };
+      }
+      broadcast({ type: "packages" });
+      return json(res, r.ok ? 200 : 400, r);
+    });
   }
 
   // ---- Jarvis Code: you browsing a project (the model goes through the tools) ----
@@ -3655,8 +3879,8 @@ function init(host) {
   if (settings.wake) setTimeout(voiceStart, 1500);
   // whisper-server is a child of this process; Windows does not take children
   // down with their parent, so stop it on the way out.
-  process.on("exit", () => { whisperStop(); kokoroStop(); qwenStop(); });
-  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { whisperStop(); kokoroStop(); qwenStop(); process.exit(0); });
+  process.on("exit", () => { whisperStop(); kokoroStop(); qwenStop(); packages.stopAll(); });
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { whisperStop(); kokoroStop(); qwenStop(); packages.stopAll(); process.exit(0); });
   // Load the voice now, so the first answer is not the one that waits for it.
   if (settings.tts !== "windows" && kokoroPaths()) setTimeout(kokoroStart, 2500);
   // The cloned voice takes half a minute: start it now, behind everything else.
@@ -3680,6 +3904,7 @@ function init(host) {
   migrateFacts().catch(() => {});
   // The data bank (every exchange, filed into chats) and the memory guide.
   usage.init(H.DATA);
+  packages.init({ dataDir: H.DATA, root: H.ROOT, reserved: () => new Set(TOOLS.map((t) => t.name)) });
   fileTools.init(H.DATA);
   const imported = chats.init(H.DATA);
   memory.init(H.DATA, {

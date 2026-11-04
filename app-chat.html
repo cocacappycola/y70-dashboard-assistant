@@ -573,6 +573,7 @@
           (p.path ? '<div class="p">' + esc(p.path) + "</div>" : "") + (p.detail ? "<pre>" + esc(p.detail) + "</pre>" : "");
         const row = el("div", "b");
         for (const [a, t, cls] of [["allow", "Allow", "btn--primary"], ["always", "Allow for this chat", "btn--ghost"], ["deny", "No", "btn--ghost"]]) {
+          if (a === "always" && p.always) continue;
           const btn = el("button", "btn btn--sm " + cls, t);
           btn.addEventListener("click", async () => {
             const i = permsList.findIndex((x) => x.id === p.id);
