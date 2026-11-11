@@ -37,6 +37,11 @@
     .tools { display: flex; flex-wrap: wrap; gap: 5px; }
     .tool { font: 11.5px ui-monospace, Consolas, monospace; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,.06); color: var(--t-text, #ddd); }
     .prob { font-size: 12px; color: #ffb35c; }
+    .tool.off { opacity: .45; text-decoration: line-through; }
+    .tdesc { display: none; flex-direction: column; gap: 6px; }
+    .card.open .tdesc { display: flex; }
+    .tdesc div { font-size: 12px; color: var(--t-sub, #a6a6b3); line-height: 1.4; }
+    .tdesc b { font: 600 12px ui-monospace, Consolas, monospace; color: var(--t-text, #ddd); }
     .btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
     .box { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--t-line, #2c2c33); }
     .box select, .box textarea { width: 100%; }
@@ -71,10 +76,12 @@
     </div>
     <div class="tabs" id="tabs">
       <button data-v="installed" class="on">Installed</button>
+      <button data-v="builtin">Built-in</button>
       <button data-v="add">Add</button>
       <button data-v="guide">Guide</button>
     </div>
     <div id="v-installed" class="view show"></div>
+    <div id="v-builtin" class="view"></div>
     <div id="v-add" class="view"></div>
     <div id="v-guide" class="view"><div id="guide"></div></div>
   </div>
@@ -87,7 +94,8 @@
     const postJ = (p, b) => fetch(API + p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b || {}) }).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
     const kbMsg = (on) => { try { parent.postMessage({ type: "y70:keyboard", on }, "*"); } catch (e) {} };
     const kb = (i) => { i.addEventListener("focus", () => kbMsg(true)); i.addEventListener("blur", () => kbMsg(false)); return i; };
-    let data = { installed: [], examples: [], dir: "" };
+    let data = { installed: [], examples: [], dir: "", builtin: [] };
+    const bopen = new Set();         // built-in packages showing their tools' descriptions
     const open = new Set();          // packages with their test/log box open
     const tests = {};                // name -> { tool, input, out, err }: kept across redraws
 
@@ -102,9 +110,38 @@
       const r = await getJ("packages");
       if (r.ok) data = r;
       const on = data.installed.filter((p) => p.enabled).length;
-      $("#sub").textContent = data.installed.length ? on + " on · " + data.installed.length + " installed · " + data.installed.filter((p) => p.enabled).reduce((n, p) => n + p.tools.length, 0) + " tools for Jarvis" : "tools for Jarvis, in any language";
+      const bt = (data.builtin || []).reduce((n, p) => n + p.tools.filter((t) => t.on).length, 0);
+      const pt = data.installed.filter((p) => p.enabled).reduce((n, p) => n + p.tools.length, 0);
+      $("#sub").textContent = (data.builtin || []).filter((p) => p.enabled).length + " built-in · " + on + " of " + data.installed.length + " installed on · " + (bt + pt) + " tools for Jarvis";
       drawInstalled();
+      drawBuiltin();
       drawAdd();
+    }
+
+    // Jarvis's own tools, a package per kind of thing.
+    function drawBuiltin() {
+      const box = $("#v-builtin");
+      box.innerHTML = "";
+      box.appendChild(el("div", "note", "Jarvis's own tools, grouped into packages. Switch one off and he is never told about its tools. Some also follow a Jarvis setting (Files, Command line, Think hard), shown on the card."));
+      for (const p of data.builtin || []) {
+        const c = el("div", "card" + (p.enabled && !p.note ? " on" : p.note ? " warn" : "") + (bopen.has(p.name) ? " open" : ""));
+        const badge = p.locked ? ["on", "always on"] : !p.enabled ? ["", "off"] : p.note ? ["warn", "on · limited"] : ["on", "on"];
+        c.appendChild(el("div", "top", '<span class="nm">' + esc(p.title) + '</span><span class="ver">' + esc(p.name) + '</span><span class="badge ' + badge[0] + '">' + badge[1] + "</span>"));
+        c.appendChild(el("div", "desc", esc(p.description)));
+        c.appendChild(el("div", "tools", p.tools.map((t) => '<span class="tool' + (t.on ? "" : " off") + '">' + esc(t.name) + "</span>").join("")));
+        if (p.enabled && p.note) c.appendChild(el("div", "prob", esc(p.note) + "; its tools that depend on it are off."));
+        if (p.setting) c.appendChild(el("div", "meta", "Setting: " + esc(p.setting.key) + " = " + esc(String(p.setting.value))));
+        c.appendChild(el("div", "tdesc", p.tools.map((t) => "<div><b>" + esc(t.name) + "</b> " + esc(t.description) + "</div>").join("")));
+        const btns = el("div", "btns");
+        const b = (text, cls, fn) => { const x = el("button", "btn btn--sm " + (cls || "btn--ghost"), text); x.addEventListener("click", fn); btns.appendChild(x); return x; };
+        if (!p.locked) {
+          if (p.enabled) b("Switch off", "btn--ghost", async () => { const r = await postJ("packages/builtin/" + p.name + "/disable"); if (!r.ok) alert(r.error); load(); });
+          else b("Switch on", "btn--primary", async () => { const r = await postJ("packages/builtin/" + p.name + "/enable"); if (!r.ok) alert(r.error); load(); });
+        }
+        b(bopen.has(p.name) ? "Hide tools" : "What its tools do", "btn--ghost", () => { bopen.has(p.name) ? bopen.delete(p.name) : bopen.add(p.name); drawBuiltin(); });
+        c.appendChild(btns);
+        box.appendChild(c);
+      }
     }
 
     // Opening a package's folder as a project in Jarvis Code.

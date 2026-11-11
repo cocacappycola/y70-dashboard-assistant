@@ -20,6 +20,37 @@ You can make one three ways:
 Installed packages live in `%APPDATA%\y70-dashboard\jarvis-packages\<name>\`.
 The Packages app shows the exact folder.
 
+### Built-in packages
+
+Jarvis's own tools come in packages too, listed in the Packages app's
+**Built-in** tab. Switching one off means he is never told about its tools.
+Some also follow a Jarvis setting (Files, Command line, Think hard). A package
+of your own can't use the name of a built-in tool.
+
+| Package | Tools | What for |
+|---|---|---|
+| web | web_search, read_page, image_search, open_web | the web |
+| weather | weather | forecasts |
+| music-video | music, youtube | Spotify and YouTube |
+| sound | volume | volume and devices |
+| timers | timer, alarm | countdowns, alarms, scheduled tools |
+| screen | layout, panel, show, look | the panel, the screen |
+| memory | remember, recall, history | memory and past chats |
+| pc-info | info | sensors, drives, phone, Discord, usage |
+| lights / discord / phone / notes | one each | those things |
+| models | find_model, download_model, think_hard | local models |
+| files | files, repo | files anywhere, repos and git |
+| text-tools | grep, lines | grep with regex and context; read and edit by line number, outlines, multi-edits, regex replace, diffs, tails |
+| shell | shell | PowerShell and cmd: run, background jobs, which, a project's tests |
+| python | python | Pythons, virtual environments, pip, running code and tests |
+| programs | programs | installing software with winget, npm and pip (always asks) |
+| coder | write_code | Jarvis Code's second model |
+| package-manager | packages | this, always on |
+
+A package you write is a separate program and can't call these tools; it uses
+its own language's libraries instead. If what you want is "run this command",
+the **shell** tool may already do it, with no package needed.
+
 ---
 
 ## 1. A package, start to finish

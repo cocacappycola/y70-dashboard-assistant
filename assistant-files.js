@@ -537,4 +537,4 @@ async function gitDiff(root, file) {
   return { ok: r.ok, text: r.out, error: r.ok ? null : r.err.trim() };
 }
 
-module.exports = { init, files, repo, TOOL_DEFS, resolve, guard, listDir, readText, gitStatus, gitDiff, run, findRepoRoot, SKIP_DIRS };
+module.exports = { init, files, repo, TOOL_DEFS, resolve, guard, listDir, readText, gitStatus, gitDiff, run, findRepoRoot, SKIP_DIRS, walk, globRe, isBinary, clip, preview, size, stat, splitArgs };

@@ -32,6 +32,8 @@ const chats = require("./assistant-chats");
 const memory = require("./assistant-memory");
 const usage = require("./assistant-usage");
 const fileTools = require("./assistant-files");
+const textTools = require("./assistant-text");
+const shellTools = require("./assistant-shell");
 const packages = require("./assistant-packages");
 const govee = require("./govee");
 const discord = require("./discord");
@@ -55,6 +57,8 @@ const DEFAULTS = {
   gameModel: "jarvis-4b",           // ...which is this one
   bootModel: true,                  // load the everyday model as soon as the router is up
   files: "ask",                     // files + repo tools: off | ask (changes) | askall (reading too) | bypass
+  shell: "ask",                     // shell + python tools: off | ask (every command) | bypass (installing programs always asks)
+  builtinOff: [],                   // built-in tool packages switched off (names from BUILTIN_PACKAGES)
   localBat: "",                     // jarvis-llm.bat, so the panel can start it
   wake: true,
   wakePhrase: "jarvis",
@@ -108,6 +112,8 @@ function saveSettings(patch) {
   if (!/^[\w.\-]{1,64}$/.test(String(next.thinkModel || ""))) next.thinkModel = DEFAULTS.thinkModel;
   if (!/^[\w.\-]{1,64}$/.test(String(next.gameModel || ""))) next.gameModel = DEFAULTS.gameModel;
   if (!["off", "ask", "askall", "bypass"].includes(next.files)) next.files = DEFAULTS.files;
+  if (!["off", "ask", "bypass"].includes(next.shell)) next.shell = DEFAULTS.shell;
+  next.builtinOff = Array.isArray(next.builtinOff) ? [...new Set(next.builtinOff.map(String).filter((n) => /^[a-z][a-z0-9-]{1,39}$/.test(n)))] : [];
   next.thinkHard = !!next.thinkHard; next.bootModel = !!next.bootModel;
   next.sensitivity = Math.max(0, Math.min(1, Number(next.sensitivity) || 0.5));
   next.endSilence = Math.round(Math.max(0.5, Math.min(4, Number(next.endSilence) || 1.5)) * 4) / 4;
@@ -1691,7 +1697,7 @@ const TOOLS = [
     },
   },
 ];
-TOOLS.push(...fileTools.TOOL_DEFS);
+TOOLS.push(...fileTools.TOOL_DEFS, ...textTools.TOOL_DEFS, ...shellTools.TOOL_DEFS);
 TOOLS.push({
   name: "packages", where: "server", core: true,
   description: "Tool packages: tools for you that live outside the dashboard, made by the user, by you, or by others. list: what is installed (on or off), and examples that can be installed. guide: the full guide to making one (read it before you build one). create (name: lowercase-with-dashes, description, language: node|python, tools: [{name, description, input_schema}]): a new package from the template; then write its real code with the files tool. test (name, tool, input): run one of its tools. enable (name): switch it on. disable (name). install (source: a folder, an example's name, or a git URL). logs (name). test, enable and install always wait for the user's OK, and a package that changes is off until enabled again.",
@@ -1706,14 +1712,82 @@ TOOLS.push({
     required: ["action"],
   },
 });
+// Jarvis Code only, and only when a coder model is picked in the app.
+TOOLS.push({
+  name: "write_code", where: "server", core: false,
+  description: "Hand the writing of code to the coder: a separate model that knows far more about code than you do, but cannot use tools. It sees only what you give it. task: exactly what to build or change, with every detail it needs (names, behaviour, constraints), since it cannot see this conversation. files: the paths it should see (the file being changed plus anything it must fit with), read for it in full. path: the file to change or create. mode: edit (change part of an existing file: the coder's changes are applied to it, each waiting for the user's OK), write (create the file, or replace all of it), answer (just return its code or explanation to you, nothing changed). Leave mode out to edit when path exists, write when it does not, answer with no path.",
+  input_schema: {
+    type: "object",
+    properties: {
+      task: { type: "string" },
+      files: { type: "array", items: { type: "string" } },
+      path: { type: "string" },
+      mode: { type: "string", enum: ["edit", "write", "answer"] },
+    },
+    required: ["task"],
+  },
+});
 const toolByName = new Map(TOOLS.map((t) => [t.name, t]));
 
-// Tools the user can switch off: think_hard (off by default) and the file
-// system ones. Off means the model is never told about them.
+// ---- built-in tool packages ------------------------------------------------------------
+// Every one of Jarvis's own tools belongs to a package, shown in the Packages
+// app beside the installed ones, and each can be switched off there (off: the
+// model is never told about its tools). The package manager itself stays on.
+// setting: the Jarvis setting that also governs it.
+const BUILTIN_PACKAGES = [
+  { name: "web", title: "Web", description: "Searching the web, reading pages, image search, opening sites on the panel.", tools: ["web_search", "read_page", "image_search", "open_web"] },
+  { name: "weather", title: "Weather", description: "Forecasts for home or anywhere.", tools: ["weather"] },
+  { name: "music-video", title: "Music and video", description: "Spotify playback and YouTube on the panel.", tools: ["music", "youtube"] },
+  { name: "sound", title: "Sound", description: "Volume, speakers, headphones, microphones, per-program volume.", tools: ["volume"] },
+  { name: "timers", title: "Timers and alarms", description: "Countdowns, alarms, and tools scheduled for later.", tools: ["timer", "alarm"] },
+  { name: "screen", title: "Screen and panel", description: "The panel's layout, apps, widgets, scenes, themes, updates, screensaver; looking at the screen; showing things.", tools: ["layout", "panel", "show", "look"] },
+  { name: "memory", title: "Memory and chats", description: "Remembering things, recalling them, past conversations.", tools: ["remember", "recall", "history"] },
+  { name: "pc-info", title: "PC and phone info", description: "Sensors, temperatures, drives, programs, phone, Discord, audio, usage: everything the dashboard knows.", tools: ["info"] },
+  { name: "lights", title: "Lights", description: "Govee lights: on, off, colours, brightness, scenes.", tools: ["lights"] },
+  { name: "discord", title: "Discord", description: "Mute, deafen, voice channels, volumes.", tools: ["discord"] },
+  { name: "phone", title: "Phone", description: "Answer, decline and hang up calls; dismiss notifications.", tools: ["phone"] },
+  { name: "notes", title: "Notes", description: "The Notes widget: write, edit, check off.", tools: ["notes"] },
+  { name: "models", title: "Local models", description: "Finding and downloading models; handing hard questions to the big one (think hard, its own setting).", tools: ["find_model", "download_model", "think_hard"], setting: "thinkHard" },
+  { name: "files", title: "Files and repos", description: "Files anywhere on the PC: list, read, find, write, edit, move, delete to the Recycle Bin; repos and git.", tools: ["files", "repo"], setting: "files" },
+  { name: "text-tools", title: "Text and code tools", description: "Precise work inside files: grep with regex, globs and context; reading and editing by line number; outlines; multi-edits; regex replace; diffs; tails.", tools: ["grep", "lines"], setting: "files" },
+  { name: "shell", title: "Command line", description: "PowerShell and cmd: run commands, background jobs and their output, which program is installed, running a project's tests.", tools: ["shell"], setting: "shell" },
+  { name: "python", title: "Python", description: "The Pythons on the PC, virtual environments: create, install packages, run code, run tests.", tools: ["python"], setting: "shell" },
+  { name: "programs", title: "Programs", description: "Installing, updating and removing software with winget, npm (global) and pip (user). Always asks first.", tools: ["programs"], setting: "shell" },
+  { name: "coder", title: "Coder (Jarvis Code)", description: "Hands code writing to a second model picked in Jarvis Code.", tools: ["write_code"], setting: "files" },
+  { name: "package-manager", title: "Package manager", description: "Listing, making, testing, enabling and installing tool packages.", tools: ["packages"], locked: true },
+];
+{
+  // Every tool has a package: a new tool left out is a mistake, caught at start.
+  const listed = new Set(BUILTIN_PACKAGES.flatMap((p) => p.tools));
+  const stray = TOOLS.map((t) => t.name).filter((n) => !listed.has(n));
+  if (stray.length) BUILTIN_PACKAGES.push({ name: "other", title: "Other", description: "Tools not yet sorted into a package.", tools: stray });
+}
+const builtinOf = new Map(BUILTIN_PACKAGES.flatMap((p) => p.tools.map((t) => [t, p])));
+function builtinOn(p) { return p.locked || !(settings.builtinOff || []).includes(p.name); }
+function builtinList() {
+  return BUILTIN_PACKAGES.map((p) => {
+    const on = builtinOn(p);
+    const why = p.setting === "files" && settings.files === "off" ? "Files access is off in Jarvis settings"
+      : p.setting === "shell" && settings.shell === "off" ? "The command line is off in Jarvis settings"
+      : p.setting === "thinkHard" && !settings.thinkHard ? "think_hard is off in Jarvis settings" : "";
+    return {
+      name: p.name, title: p.title, description: p.description, builtin: true, locked: !!p.locked, enabled: on, note: why,
+      setting: p.setting ? { key: p.setting, value: settings[p.setting] } : null,
+      tools: p.tools.map((n) => { const t = toolByName.get(n); return { name: n, description: t ? t.description : "", on: on && toolOn(n) }; }),
+    };
+  });
+}
+
+// Tools the user can switch off: a built-in package, think_hard (off by
+// default), the file system ones, the command line. Off means the model is
+// never told about them.
 function toolOn(t) {
   const name = typeof t === "string" ? t : t.name;
+  const pk = builtinOf.get(name);
+  if (pk && !builtinOn(pk)) return false;
   if (name === "think_hard") return !!settings.thinkHard;
-  if (name === "files" || name === "repo") return settings.files !== "off";
+  if (name === "files" || name === "repo" || name === "write_code" || name === "grep" || name === "lines") return settings.files !== "off";
+  if (name === "shell" || name === "python" || name === "programs") return settings.shell !== "off";
   return true;
 }
 function claudeTools() {
@@ -2370,6 +2444,8 @@ async function runServerTool(name, input, emit, conv) {
       return thinkStart(a, conv);
     case "history": return historyTool(a, emit, conv);
     case "files": case "repo": return fsTool(name, a, emit, conv);
+    case "write_code": return coderTool(a, emit, conv);
+    case "grep": case "lines": case "shell": case "python": case "programs": return handsTool(name, a, emit, conv);
     case "info": {
       const r = await info(String(a.about || "everything"), a);
       return [JSON.stringify(r), !!(r && r.error)];
@@ -2436,7 +2512,8 @@ async function packagesTool(a, emit, conv) {
     return [(l.length ? l.map((p) => "- " + p.name + " " + p.version + " (" + (p.enabled ? "on" : p.changed ? "changed since you enabled it: off until enabled again" : "off") + ")" +
       ": " + p.description + " Tools: " + p.tools.map((t) => t.name).join(", ") + (p.problems.length ? ". Problems: " + p.problems.join("; ") : "") + ". Folder: " + p.dir).join("\n") : "No packages installed.") +
       (ex.length ? "\nExamples that can be installed: " + ex.map((e) => e.name + " (" + e.description + ")").join("; ") : "") +
-      "\nPackages folder: " + packages.dir];
+      "\nPackages folder: " + packages.dir +
+      "\nBuilt-in packages (your own tools; the user switches them in the Packages app): " + builtinList().map((p) => p.name + " " + (p.enabled ? (p.note ? "on, limited: " + p.note : "on") : "off") + " [" + p.tools.map((t) => t.name).join(", ") + "]").join("; ")];
   }
   if (act === "guide") {
     const g = packages.docs();
@@ -2485,6 +2562,11 @@ const TOOL_GUIDE = {
   history: "anything from a past conversation the memory guide does not spell out (what was said, decided, recommended, when), or to go back to an older chat or start a fresh one",
   files: "anything about files and folders on the PC: what is in a folder, find a file, read or summarise one, write or change one, make, move, copy or delete things",
   repo: "code projects: what a repo is and its state (overview first), git (status, log, diff, commit, branches, push, clone), a new repo, a new GitHub repo",
+  grep: "finding text inside files: where something is used or defined, every TODO, which file mentions a word (regex, file globs, context lines)",
+  lines: "precise work in a text file by line number: read a range or around a line, an outline of its functions, replace / insert / delete lines, several edits at once, regex replace, compare two files, the end of a log",
+  shell: "running a command or program on the PC (PowerShell or cmd), a build, a server in the background, whether a program is installed and its version, a project's tests",
+  python: "Python: which Pythons there are, making a virtual environment, installing packages into one, running Python code or a script, running tests",
+  programs: "installing, updating or removing a program or tool (winget, npm, pip): search for the exact id first",
   think_hard: "a question that needs real thought (hard reasoning, maths, code, planning, a decision, a proper explanation), or when asked to think hard or take your time: the big model works on it and the answer comes later",
   info: "anything about the PC (CPU, GPU, temperatures, power draw, fan speeds, drives' temperature, space and health, memory, network, what is running, uptime; about sensors for any single reading), the iPhone (battery, notifications, a call), Discord (who is in the channel, who is talking), sound devices and program volumes, what is playing, Claude usage and spend, the lights, the local models",
   panel: "this app itself: check for or install updates, switch forks, a theme, your own settings, reload; the PC's screensaver (\"screensaver\", \"go to sleep\" for the screens); Wallpaper Engine (next wallpaper, pause it)",
@@ -3206,8 +3288,14 @@ const perms = new Map();          // id -> { resolve, req, conv }
 const PERM_WAIT_MS = 2 * 60 * 1000;
 function askPermission(conv, emit, req) {
   const mode = settings.files;
-  // req.always: running code (a tool package). No setting skips that question.
-  if (!req.always) {
+  // req.always: running code (a tool package), installing a program. No
+  // setting skips that question. req.shell: a command, by the shell setting.
+  if (req.shell && !req.always) {
+    if (settings.shell === "off") return Promise.resolve(false);
+    if (settings.shell === "bypass") return Promise.resolve(true);
+    if (conv && conv.shellAllow) return Promise.resolve(true);
+    req = { ...req, write: true };
+  } else if (!req.always) {
     if (mode === "off") return Promise.resolve(false);
     if (mode === "bypass") return Promise.resolve(true);
     if (!req.write && mode === "ask") return Promise.resolve(true);
@@ -3230,7 +3318,7 @@ function settlePermission(id, answer) {
   perms.delete(id);
   clearTimeout(p.timer);
   const ok = answer === "allow" || answer === "always";
-  if (answer === "always" && p.conv && !p.req.always) p.conv.fsAllow = "all";
+  if (answer === "always" && p.conv && !p.req.always) { if (p.req.shell) p.conv.shellAllow = true; else p.conv.fsAllow = "all"; }
   const done = { type: "permission-done", id, answer, allowed: ok };
   try { p.emit(done); p.emit({ type: "status", text: "" }); } catch (e) {}
   broadcast(done);
@@ -3253,6 +3341,221 @@ async function fsTool(name, a, emit, conv) {
   } catch (e) {
     return [(e.code === "EACCES" || e.code === "EPERM" ? "Windows won't let me: " : "That failed: ") + e.message, true];
   }
+}
+
+// grep and lines (precise file work), shell, python and programs (the command
+// line): the same asking-first as files, each with its own setting.
+async function handsTool(name, a, emit, conv) {
+  const isText = name === "grep" || name === "lines";
+  if (isText && settings.files === "off") return ["Files access is switched off in Jarvis settings.", true];
+  if (!isText && settings.shell === "off") return ["The command line is switched off in Jarvis settings (Shell).", true];
+  const ctx = {
+    cwd: conv && conv.fsCwd,
+    limit: conv && conv.provider === "claude" ? 30000 : conv && conv.code ? 12000 : 9000,
+    ask: (req) => askPermission(conv, emit, req),
+    signal: conv && conv.signal,
+  };
+  try {
+    const r = name === "grep" ? await textTools.grep(a, ctx) : name === "lines" ? await textTools.lines(a, ctx)
+      : name === "shell" ? await shellTools.shell(a, ctx) : name === "python" ? await shellTools.python(a, ctx) : await shellTools.programs(a, ctx);
+    if (conv && ctx.cwd) conv.fsCwd = ctx.cwd;
+    return r;
+  } catch (e) {
+    return [(e.code === "EACCES" || e.code === "EPERM" ? "Windows won't let me: " : "That failed: ") + e.message, true];
+  }
+}
+
+// ---- Jarvis Code: the coder ------------------------------------------------------
+// Some models plan and use tools well but know little code (Nemotron Nano);
+// others know code but fumble tools (the R1 distills). So the planner can hand
+// the writing to a coder model that never sees a tool: it gets the task and the
+// files as plain text, answers in SEARCH/REPLACE blocks or a whole file, and
+// Jarvis applies that through the files tool (same guard, same OK on the panel).
+// The router keeps one model loaded, so each handoff swaps models.
+const CODER_MAX_OUT = 6144;
+
+function coderPrompt(mode) {
+  const head = "You are an expert programmer. You get a task and the files it concerns. The files are shown with line numbers on the left; those numbers are not part of the files. Do exactly the task, no more, in the code's own style, naming and comments.";
+  if (mode === "edit") return head + "\n\nAnswer with one or more change blocks, each exactly like this:\n\n<<<<<<< SEARCH\n(the existing lines, copied exactly, without the line numbers, enough of them to be unique in the file)\n=======\n(the lines that replace them)\n>>>>>>> REPLACE\n\nKeep each SEARCH short: just the lines that change plus a line or two around them. To add code, SEARCH the line it goes after and REPLACE it with that line plus the new code. After the blocks, one or two sentences on what you changed.";
+  if (mode === "write") return head + "\n\nAnswer with the complete file in ONE fenced code block, nothing left out (no \"rest unchanged\" comments), then one or two sentences on it.";
+  return head + "\n\nAnswer with the code in fenced code blocks and a short explanation.";
+}
+
+// The coder's answer without its reasoning (the R1 distills think first, in
+// <think>…</think>, and the template may already have opened the tag).
+function stripThink(text) {
+  const t = String(text || "");
+  const end = t.lastIndexOf("</think>");
+  return (end >= 0 ? t.slice(end + 8) : t.replace(/^\s*<think>[\s\S]*$/, "")).trim();
+}
+
+function parseBlocks(text) {
+  const out = [];
+  const re = /<{5,9} ?SEARCH[^\n]*\n([\s\S]*?)\n?={5,9}[^\n]*\n([\s\S]*?)\n?>{5,9} ?REPLACE/g;
+  let m;
+  while ((m = re.exec(text))) out.push({ find: m[1], replace: m[2] });
+  return out;
+}
+
+// A copied line number ("  12  code") is not part of the file.
+function dropLineNumbers(s) {
+  const lines = s.split("\n");
+  const numbered = lines.filter((l) => l.trim()).every((l) => /^\s{0,6}\d+ {2}/.test(l));
+  return numbered && lines.some((l) => l.trim()) ? lines.map((l) => l.replace(/^\s{0,6}\d+ {2}/, "")).join("\n") : s;
+}
+
+function largestFence(text) {
+  const re = /```[^\n]*\n([\s\S]*?)```/g;
+  let m, best = null;
+  while ((m = re.exec(text))) if (!best || m[1].length > best.length) best = m[1];
+  return best;
+}
+
+async function coderAsk(conv, emit, system, user) {
+  const base = settings.localUrl.replace(/\/+$/, "");
+  const model = conv.coder;
+  const window = ctxWindow(model) || 16384;
+  if (local.loaded !== model) emit({ type: "status", text: "Waking the coder (" + model + ")…" });
+  const t0 = Date.now();
+  meter(conv, emit, { stage: "reading", model, window, ctx: Math.round((system.length + user.length) / 3.4), est: true });
+  let res;
+  try {
+    res = await fetch(base + "/v1/chat/completions", {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal: conv.signal,
+      body: JSON.stringify({
+        model, stream: true, max_tokens: CODER_MAX_OUT, temperature: 0.6, top_p: 0.95,
+        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      }),
+    });
+  } catch (e) {
+    if (e.name === "AbortError") throw e;
+    local.up = false;
+    return { error: "The local model server isn't running, so the coder can't be reached." };
+  }
+  if (!res.ok) return { error: "The coder (" + model + ") returned an error (" + res.status + "): " + (await res.text().catch(() => "")).slice(0, 200) };
+  local.loaded = model;
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "", text = "", reasoning = 0, pieces = 0, firstAt = 0, lastAt = 0, timings = null, finish = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") continue;
+      let j; try { j = JSON.parse(data); } catch (e) { continue; }
+      if (j.error) return { error: "Coder error: " + (j.error.message || "unknown") };
+      if (j.timings) timings = j.timings;
+      const ch = j.choices && j.choices[0];
+      if (!ch) continue;
+      const d = ch.delta || {};
+      if (d.content) text += d.content;
+      if (d.reasoning_content) reasoning += d.reasoning_content.length;
+      if (d.content || d.reasoning_content) {
+        pieces++;
+        if (!firstAt) firstAt = Date.now();
+        if (Date.now() - lastAt > 500) {
+          lastAt = Date.now();
+          const thinking = reasoning && !text || (/<think>/.test(text) && !/<\/think>/.test(text));
+          emit({ type: "status", text: "The coder is " + (thinking ? "thinking" : "writing") + "… " + pieces + " tokens" });
+          meter(conv, emit, { stage: "writing", model, window, out: pieces, tps: pieces / Math.max(0.2, (Date.now() - firstAt) / 1000) });
+        }
+      }
+      if (ch.finish_reason) finish = ch.finish_reason;
+    }
+  }
+  const ms = Date.now() - t0;
+  const use = timings
+    ? { in: (timings.prompt_n | 0) + (timings.cache_n | 0), cached: timings.cache_n | 0, out: timings.predicted_n | 0, ms, promptMs: Math.round(timings.prompt_ms || 0), genMs: Math.round(timings.predicted_ms || 0), window }
+    : { in: Math.round(user.length / 3.4), cached: 0, out: pieces, ms, promptMs: firstAt ? firstAt - t0 : ms, genMs: firstAt ? Date.now() - firstAt : 0, window, est: true };
+  const u = conv.log && conv.log.usage;
+  if (u) { u.in += use.in; u.cached += use.cached; u.out += use.out; u.requests++; u.ms += use.ms; }
+  usage.request({ kind: "code", provider: "local", model, chatId: conv.chatId, ...use });
+  const answer = stripThink(text);
+  if (!answer) return { error: finish === "length" ? "The coder used all " + CODER_MAX_OUT + " tokens thinking and never answered. Give it a smaller, more exact task." : "The coder came back with nothing." };
+  return { answer, cut: finish === "length", ms };
+}
+
+async function coderTool(a, emit, conv) {
+  if (!conv || !conv.code || !conv.coder) return ["There is no coder picked in Jarvis Code. Write the code yourself.", true];
+  if (settings.autoGameModel && game.on) return ["The coder is off while a game is running (it would take the game's memory). Write the code yourself, or wait.", true];
+  if (think.job) return ["The big model is thinking, so the coder can't load now. Write the code yourself.", true];
+  const task = String(a.task || "").trim();
+  if (!task) return ["write_code needs a task.", true];
+  const fctx = { cwd: conv.fsCwd || conv.code.root, limit: 200000, ask: (req) => askPermission(conv, emit, req) };
+  const target = a.path ? fileTools.resolve(a.path, fctx) : null;
+  let exists = false;
+  if (target) { try { exists = fs.statSync(target).isFile(); } catch (e) {} }
+  const mode = a.mode === "edit" || a.mode === "write" || a.mode === "answer" ? a.mode : !target ? "answer" : exists ? "edit" : "write";
+  if (mode === "edit" && !exists) return ["There is no file at " + target + " to edit. Use mode write to create it.", true];
+
+  // What it gets to see: the target first, then the rest, as much as fits.
+  const window = ctxWindow(conv.coder) || 16384;
+  let room = Math.max(4000, (window - CODER_MAX_OUT - 1200) * 3.2 - task.length);
+  const want = [];
+  if (target && exists) want.push(target);
+  for (const f of Array.isArray(a.files) ? a.files.slice(0, 8) : []) {
+    const p = fileTools.resolve(String(f), fctx);
+    if (!want.some((w) => w.toLowerCase() === p.toLowerCase())) want.push(p);
+  }
+  const shown = [], skipped = [];
+  for (const p of want) {
+    const [out, err] = await fileTools.files({ action: "read", path: p, lines: 2000 }, fctx);
+    if (err) { if (p === target) return ["Couldn't read " + p + " for the coder: " + out, true]; skipped.push(path.basename(p) + " (" + out + ")"); continue; }
+    if (out.length > room) {
+      if (p === target) return [path.basename(p) + " is too big for the coder's context (" + Math.round(out.length / 1000) + "k characters; room for " + Math.round(room / 1000) + "k). Ask it for one function at a time with mode answer, then edit it in yourself.", true];
+      skipped.push(path.basename(p) + " (no room)");
+      continue;
+    }
+    room -= out.length;
+    shown.push(out);
+  }
+  const user = "Task: " + task + "\n" +
+    (target ? "\nThe file to " + (mode === "edit" ? "change" : "write") + ": " + target + "\n" : "") +
+    (shown.length ? "\n" + shown.join("\n\n") + "\n" : "");
+  emit({ type: "status", text: "Handing it to the coder (" + conv.coder + ")…" });
+  const r = await coderAsk(conv, emit, coderPrompt(mode), user);
+  if (r.error) return [r.error, true];
+  const note = r.answer.replace(/<{5,9} ?SEARCH[\s\S]*?>{5,9} ?REPLACE/g, "").replace(/```[\s\S]*?```/g, "").trim().slice(0, 1200);
+  const took = " (" + (r.ms / 1000).toFixed(0) + " s)";
+
+  if (mode === "answer") return ["The coder" + took + ":\n" + r.answer.slice(0, 16000) + (r.cut ? "\n(it ran out of room and was cut off)" : "")];
+
+  if (mode === "write") {
+    const body = largestFence(r.answer);
+    if (!body) return ["The coder didn't send the file in a code block. Its answer:\n" + r.answer.slice(0, 4000), true];
+    if (r.cut) return ["The coder ran out of room before the file was finished, so nothing was written. Give it a smaller piece.", true];
+    const [out, err] = await fileTools.files({ action: "write", path: target, content: body, overwrite: true }, fctx);
+    if (err) return [out, true];
+    return ["The coder wrote it" + took + ". " + out + (note ? "\nIts note: " + note : "") + "\nCheck it: read it back or repo git diff."];
+  }
+
+  // edit: apply each block in turn.
+  const blocks = parseBlocks(r.answer);
+  if (!blocks.length) return ["The coder didn't answer with change blocks. Its answer:\n" + r.answer.slice(0, 4000), true];
+  let crlf = false;
+  try { crlf = /\r\n/.test(fs.readFileSync(target, "utf8")); } catch (e) {}
+  const done = [], failed = [];
+  for (const [k, b] of blocks.entries()) {
+    let find = dropLineNumbers(b.find), replace = dropLineNumbers(b.replace);
+    if (crlf) { find = find.replace(/\r?\n/g, "\r\n"); replace = replace.replace(/\r?\n/g, "\r\n"); }
+    const [out, err] = await fileTools.files({ action: "edit", path: target, find, replace }, fctx);
+    if (err) {
+      failed.push("Change " + (k + 1) + ": " + out + "\nIt tried to find:\n" + b.find.slice(0, 800) + "\nand put:\n" + b.replace.slice(0, 800));
+      if (/said no/.test(out)) break;
+    } else done.push(k + 1);
+  }
+  const lines = ["The coder" + took + " made " + blocks.length + " change" + (blocks.length === 1 ? "" : "s") + " to " + target + ": " + done.length + " applied" + (failed.length ? ", " + failed.length + " not" : "") + "."];
+  if (note) lines.push("Its note: " + note);
+  if (skipped.length) lines.push("Not shown to it: " + skipped.join("; "));
+  if (failed.length) lines.push("Not applied (fix these yourself with files edit, or ask again):\n" + failed.join("\n\n"));
+  lines.push("Check it: repo git with \"diff\".");
+  return [lines.join("\n"), failed.length > 0 && !done.length];
 }
 
 // ---- Jarvis Code: working in a project ---------------------------------------------
@@ -3284,11 +3587,11 @@ async function codeProject(root, touch) {
   return { ok: true, ...e };
 }
 
-const CODE_TOOLS = new Set(["files", "repo", "web_search", "read_page", "packages"]);
+const CODE_TOOLS = new Set(["files", "repo", "grep", "lines", "shell", "python", "programs", "web_search", "read_page", "packages"]);
 function toolsFor(conv, big) {
-  if (conv && conv.code) return TOOLS.filter((t) => CODE_TOOLS.has(t.name) && toolOn(t));
+  if (conv && conv.code) return TOOLS.filter((t) => (CODE_TOOLS.has(t.name) || (t.name === "write_code" && conv.coder)) && toolOn(t));
   // His own, then the enabled packages' (a package tool is core unless it says not).
-  return TOOLS.filter((t) => (big || t.core) && toolOn(t)).concat(packages.tools().filter((t) => big || t.core));
+  return TOOLS.filter((t) => (big || t.core) && t.name !== "write_code" && toolOn(t)).concat(packages.tools().filter((t) => big || t.core));
 }
 
 function codeSystemPrompt(conv) {
@@ -3297,14 +3600,17 @@ function codeSystemPrompt(conv) {
     "You are Jarvis, " + who() + "'s coding assistant, working in the project \"" + c.name + "\" at " + c.root + ". This is Jarvis Code, an app on their panel: what you write is read, not spoken, so write normally, with markdown and code in fenced blocks.",
     "",
     "How you work:",
-    "1. Look before you change anything. In a new conversation start with repo overview. Find things with files find (by name or text) and read the files you need with files read (big ones a part at a time). Never guess what a file says.",
-    "2. Change files with files edit: copy the exact lines from what you read, enough of them to be unique, and change only what the task needs. New files with files write. Keep to the code's own style, naming and comments.",
-    "3. Work in small steps and check them: after an edit, read the changed part back if it matters; repo git with \"diff\" shows what you did.",
+    "1. Look before you change anything. In a new conversation start with repo overview. Find code with grep (where a name is defined or used; include narrows by file type, context shows the lines around), files find for file names, lines outline for a file's functions with line numbers, and read what you need with lines read (from/to, or line + context). Never guess what a file says.",
+    "2. Change files with files edit (exact lines copied from what you read, enough to be unique) or lines multi_edit for several changes in one file; lines replace / insert / delete work by line number (pass expect, the start of that line, so stale numbers are caught). New files with files write. Change only what the task needs, in the code's own style, naming and comments.",
+    "3. Work in small steps and check them: run it, build it or test it with shell (shell test finds the project's test runner; shell start for servers and watchers, then shell output). Python projects: python envs / create / install / run / test. Need a program that isn't installed? shell which to check, programs search then install (it asks the user). repo git with \"diff\" shows what you changed.",
     "4. Finish with a short summary: what you changed, file by file, and anything " + who() + " should check or run.",
     "5. Commit, push, delete, open programs or clone only when asked. Never force-push, reset --hard or throw work away.",
     "6. Every change waits for " + who() + "'s OK on the panel unless they turned that off. If they say no, stop and ask what they want instead.",
     "7. Relative paths are inside the project. If a tool fails, read the error and try a different way, two or three times at most, then explain.",
     "8. A question about the code needs reading, not changing: answer it from what the files say, with file names and line numbers.",
+    ...(conv.coder ? [
+      "9. You have a coder (write_code): a model that writes code far better than you but cannot use tools. You plan, look and check; it writes. For any new code or change bigger than a line or two, call write_code instead of writing it yourself: first find and read what matters, then give it a complete task, the files it must see and the path to change. It applies its own edits. Afterwards check its work (repo git with \"diff\", or read the changed part) and fix small slips with files edit.",
+    ] : []),
     "",
     "Be direct and specific. No filler.",
   ].join("\n");
@@ -3434,6 +3740,9 @@ async function handleTurn(req, res) {
           if (!conv.fsCwd || !conv.fsCwd.toLowerCase().startsWith(code.root.toLowerCase())) conv.fsCwd = code.root;
           conv.provider = want === "claude" && claudeClient() ? "claude" : want === "claude" ? await chooseProvider() : "local";
           conv.localModel = want && want !== "claude" && /^[\w.\-]{1,64}$/.test(want) ? want : null;
+          // The coder: a second local model that only writes code (write_code).
+          const coder = String(body.coder || "");
+          conv.coder = /^[\w.\-]{1,96}$/.test(coder) && models.readIni(settings).some((m) => m.id === coder) ? coder : null;
         } else conv.provider = await chooseProvider();
         conv.log = { heard: text, reply: "", tools: [], cards: [], at: Date.now(), usage: freshUsage() };
         conv.searches = 0;
@@ -3453,6 +3762,7 @@ async function handleTurn(req, res) {
         emit({ type: "start", conv: conv.id, provider: conv.provider, model: conv.provider === "claude" ? settings.claudeModel : localModelFor(conv), chat: conv.chatId || null });
       }
       conv.at = Date.now();
+      conv.signal = ctl.signal;
       const outcome = await runLoop(conv, emit, ctl.signal);
       conv.at = Date.now();
       if (outcome === "end") finish(conv, emit);
@@ -3657,7 +3967,20 @@ async function handle(req, res, urlPath) {
   // ---- Tool packages: you managing them (a tap here is your yes) -------------------
   if (sub === "packages" && req.method === "GET") {
     packages.scan();
-    return json(res, 200, { ok: true, installed: packages.list(), examples: packages.examples(), dir: packages.dir });
+    return json(res, 200, { ok: true, installed: packages.list(), examples: packages.examples(), dir: packages.dir, builtin: builtinList() });
+  }
+  // A built-in package on or off.
+  const bpm = /^packages\/builtin\/([a-z][a-z0-9-]{1,39})\/(enable|disable)$/.exec(sub);
+  if (bpm && req.method === "POST") {
+    const p = BUILTIN_PACKAGES.find((x) => x.name === bpm[1]);
+    if (!p) return json(res, 404, { ok: false, error: "No built-in package " + bpm[1] });
+    if (p.locked) return json(res, 400, { ok: false, error: "The package manager stays on." });
+    const off = new Set(settings.builtinOff || []);
+    if (bpm[2] === "enable") off.delete(p.name); else off.add(p.name);
+    const err = saveSettings({ builtinOff: [...off] });
+    broadcast({ type: "packages" });
+    broadcast({ type: "settings" });
+    return json(res, err ? 500 : 200, err ? { ok: false, error: err } : { ok: true, builtin: builtinList() });
   }
   if (sub === "packages/docs" && req.method === "GET") return json(res, 200, { ok: true, markdown: packages.docs() });
   if (sub === "packages/install" && req.method === "POST") {
@@ -3879,8 +4202,8 @@ function init(host) {
   if (settings.wake) setTimeout(voiceStart, 1500);
   // whisper-server is a child of this process; Windows does not take children
   // down with their parent, so stop it on the way out.
-  process.on("exit", () => { whisperStop(); kokoroStop(); qwenStop(); packages.stopAll(); });
-  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { whisperStop(); kokoroStop(); qwenStop(); packages.stopAll(); process.exit(0); });
+  process.on("exit", () => { whisperStop(); kokoroStop(); qwenStop(); packages.stopAll(); shellTools.stopAll(); });
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { whisperStop(); kokoroStop(); qwenStop(); packages.stopAll(); shellTools.stopAll(); process.exit(0); });
   // Load the voice now, so the first answer is not the one that waits for it.
   if (settings.tts !== "windows" && kokoroPaths()) setTimeout(kokoroStart, 2500);
   // The cloned voice takes half a minute: start it now, behind everything else.

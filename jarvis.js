@@ -2252,6 +2252,15 @@
       bypass: "He reads and changes files and runs git without asking. Deletes still go to the Recycle Bin; Windows, Program Files and the panel's keys stay off-limits.",
     }[JS.files] || "", JS.files === "bypass" ? "warn" : ""));
 
+    // ---- Command line (shell, python, programs)
+    f.appendChild(label("Command line", "PowerShell, cmd, Python, installing programs"));
+    f.appendChild(chips([["off", "Off"], ["ask", "Ask for every command"], ["bypass", "Bypass: never ask"]], JS.shell || "ask", (v) => saveSetting({ shell: v })));
+    f.appendChild(status({
+      off: "He can't run commands, Python or installers.",
+      ask: "Every command, Python run and package install waits for your Allow on the panel (or “Allow for this chat”). Installing or removing a program always asks.",
+      bypass: "He runs commands and Python without asking. Installing or removing a program still asks, and a short list of PC-wrecking commands (formatting, wiping, boot config) is always refused.",
+    }[JS.shell || "ask"] || "", JS.shell === "bypass" ? "warn" : ""));
+
     // ---- Tool packages
     f.appendChild(label("Tool packages", "his tools from outside the dashboard"));
     const pkRow = el("div", "jf-row");

@@ -146,6 +146,7 @@
     <div id="v-changes" class="view"></div>
     <form id="compose" hidden>
       <div class="models" id="models"></div>
+      <div class="models" id="coders"></div>
       <div class="line">
         <textarea class="ui-input" id="say" rows="1" placeholder="Ask Jarvis to read, explain, fix or build something…"></textarea>
         <button class="btn btn--primary btn--sm" id="send" type="submit">Send</button>
@@ -208,6 +209,7 @@
     let view = "projects";
     let conv = null, convAt = 0, busy = null;   // busy = AbortController of the running turn
     let model = store.get("model", "");
+    let coder = store.get("coder", "");   // "" = no coder: the model writes its own code
 
     function setView(v) {
       view = v;
@@ -326,11 +328,21 @@
       repo: (a) => a.action === "git" ? "git " + (a.args || "") : a.action === "overview" ? "Overview of " + base(a.path || project.root) : a.action === "create" ? "New repo " + (a.name || base(a.path)) : "Publish " + (a.name || ""),
       web_search: (a) => "Search the web: " + (a.query || ""),
       read_page: (a) => "Read " + (a.url || ""),
+      grep: (a) => "Grep \"" + String(a.pattern || "").slice(0, 50) + "\" in " + base(a.path || ".") + (a.include ? " (" + a.include + ")" : ""),
+      lines: (a) => ({ read: "Read", read_many: "Read several", outline: "Outline", tail: "Tail", count: "Count", diff: "Diff", replace: "Replace lines in", insert: "Insert into", delete: "Delete lines in", multi_edit: "Edits to", regex_replace: "Regex replace in" }[a.action] || a.action) + " " + (a.action === "read_many" ? (a.reads || []).map((r) => base(r.path || "")).join(", ") : base(a.path || ".")) + (a.from ? " · " + a.from + (a.to ? "-" + a.to : "") : a.line ? " · around " + a.line : ""),
+      shell: (a) => ({ run: "", start: "Start: ", output: "Output of ", stop: "Stop ", jobs: "Jobs", which: "Which ", test: "Run tests" }[a.action] || "") + (a.action === "output" || a.action === "stop" ? a.id || "" : a.action === "which" ? a.name || a.command || "" : String(a.command || "").slice(0, 90)),
+      python: (a) => "Python " + (a.action || "") + (a.packages && a.packages.length ? " " + a.packages.join(" ") : "") + (a.env ? " · " + base(a.env) : "") + (a.file ? " " + base(a.file) : a.module ? " -m " + a.module : ""),
+      programs: (a) => ({ search: "Search programs", info: "Program info", installed: "Installed programs", check: "Check", install: "Install", upgrade: "Update", uninstall: "Uninstall" }[a.action] || a.action) + " " + (a.id || a.query || a.name || "") + (a.manager && a.manager !== "winget" ? " (" + a.manager + ")" : ""),
+      write_code: (a) => "Coder: " + ({ edit: "change ", write: "write " }[a.mode] || (a.path ? "work on " : "answer")) + (a.path ? base(a.path) : "") + " · " + String(a.task || "").slice(0, 70),
     };
-    const ICON = { files: "📄", repo: "⎇", web_search: "🔎", read_page: "🌐" };
+    const ICON = { files: "📄", repo: "⎇", web_search: "🔎", read_page: "🌐", write_code: "✍", grep: "🔍", lines: "≡", shell: "›_", python: "🐍", programs: "⬇" };
     function stepDetail(name, a) {
       if (name === "files" && a.action === "edit") return '<pre class="diff">' + diffHtml(String(a.find || "").split("\n").map((l) => "-" + l).join("\n") + "\n" + String(a.replace || "").split("\n").map((l) => "+" + l).join("\n")) + "</pre>";
       if (name === "files" && (a.action === "write" || a.action === "append")) return "<pre>" + esc(String(a.content || "").slice(0, 6000)) + "</pre>";
+      if (name === "shell" && a.command) return "<pre>" + esc(String(a.command).slice(0, 4000)) + "</pre>";
+      if (name === "python" && a.code) return "<pre>" + esc(String(a.code).slice(0, 4000)) + "</pre>";
+      if (name === "lines" && (a.action === "replace" || a.action === "insert") && a.content) return "<pre>" + esc(String(a.content).slice(0, 6000)) + "</pre>";
+      if (name === "write_code") return "<pre>" + esc(String(a.task || "") + (a.files && a.files.length ? "\n\nFiles: " + a.files.join(", ") : "")) + "</pre>";
       return "";
     }
 
@@ -369,7 +381,7 @@
       try {
         const res = await fetch(API + "turn", {
           method: "POST", headers: { "Content-Type": "application/json" }, signal: ctl.signal,
-          body: JSON.stringify({ text, conv: Date.now() - convAt < 55 * 60 * 1000 ? conv : null, code: { root: project.root }, model }),
+          body: JSON.stringify({ text, conv: Date.now() - convAt < 55 * 60 * 1000 ? conv : null, code: { root: project.root }, model, coder }),
         });
         const reader = res.body.getReader();
         const dec = new TextDecoder();
@@ -404,7 +416,7 @@
             } else if (ev.type === "tool-result") {
               const row = rows.get(ev.id);
               if (row && ev.text) row.querySelector(".bd").appendChild(el("pre", ev.ok ? "" : "err", esc(ev.text)));
-              if (ev.name === "files" || ev.name === "repo") refreshGit();
+              if (/^(files|repo|lines|shell|python|write_code)$/.test(ev.name)) refreshGit();
             } else if (ev.type === "permission") {
               // Asked right where the step is.
               const box = el("div", "ask" + (ev.write ? "" : " read"), '<div class="k">' + (ev.write ? "Jarvis wants to change something" : "Jarvis wants to look") + '</div><div class="t">' + esc(ev.title) + "</div>" +
@@ -471,6 +483,17 @@
         b.type = "button";
         b.addEventListener("click", () => { model = id; store.set("model", id); loadModels(); });
         box.appendChild(b);
+      }
+      // The coder: a second local model the first one hands code writing to.
+      const copts = [["", "Off"]].concat(local.filter((m) => m.id !== think && m.served !== false).map((m) => [m.id, m.id]));
+      if (!copts.some((o) => o[0] === coder)) coder = "";
+      const cbox = $("#coders");
+      cbox.innerHTML = '<span title="A second model that writes the code; the model above plans, reads and checks">Coder:</span>';
+      for (const [id, label] of copts) {
+        const b = el("button", "chip" + (id === coder ? " on" : ""), esc(label));
+        b.type = "button";
+        b.addEventListener("click", () => { coder = id; store.set("coder", id); loadModels(); });
+        cbox.appendChild(b);
       }
     }
 
