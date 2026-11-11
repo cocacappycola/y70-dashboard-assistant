@@ -33,6 +33,8 @@ const memory = require("./assistant-memory");
 const usage = require("./assistant-usage");
 const fileTools = require("./assistant-files");
 const textTools = require("./assistant-text");
+const binTools = require("./assistant-binary");
+const agent = require("./assistant-agent");
 const shellTools = require("./assistant-shell");
 const packages = require("./assistant-packages");
 const govee = require("./govee");
@@ -1697,7 +1699,7 @@ const TOOLS = [
     },
   },
 ];
-TOOLS.push(...fileTools.TOOL_DEFS, ...textTools.TOOL_DEFS, ...shellTools.TOOL_DEFS);
+TOOLS.push(...fileTools.TOOL_DEFS, ...textTools.TOOL_DEFS, ...binTools.TOOL_DEFS, ...shellTools.TOOL_DEFS);
 TOOLS.push({
   name: "packages", where: "server", core: true,
   description: "Tool packages: tools for you that live outside the dashboard, made by the user, by you, or by others. list: what is installed (on or off), and examples that can be installed. guide: the full guide to making one (read it before you build one). create (name: lowercase-with-dashes, description, language: node|python, tools: [{name, description, input_schema}]): a new package from the template; then write its real code with the files tool. test (name, tool, input): run one of its tools. enable (name): switch it on. disable (name). install (source: a folder, an example's name, or a git URL). logs (name). test, enable and install always wait for the user's OK, and a package that changes is off until enabled again.",
@@ -1712,6 +1714,17 @@ TOOLS.push({
     required: ["action"],
   },
 });
+// Planning and undo, for longer jobs.
+TOOLS.push({
+  name: "todo", where: "server", core: false,
+  description: "Your plan for a job with several steps, shown to the user and reminded to you every step so you don't lose track. set (items: [step, step, ...]): write the plan (replaces it). done (n: step number, or several as items: [\"1\",\"3\"]): tick steps off. add (text): a step at the end. remove (n). show. Make a plan when a request needs more than three or four steps; tick each step as soon as it is finished.",
+  input_schema: { type: "object", properties: { action: { type: "string", enum: ["set", "done", "add", "remove", "show"] }, items: { type: "array", items: { type: "string" } }, n: { type: "integer" }, text: { type: "string" } }, required: ["action"] },
+}, {
+  name: "checkpoint", where: "server", core: false,
+  description: "Undo for files. Before this conversation first changes a file (files, lines, the coder), its original is kept. list: every file changed in this conversation and whether it still differs. diff (path): what changed in it since. restore (path, or all: true): put it back as it was before this conversation touched it (a file this conversation created is moved to the Recycle Bin). Restoring asks the user first.",
+  input_schema: { type: "object", properties: { action: { type: "string", enum: ["list", "diff", "restore"] }, path: { type: "string" }, all: { type: "boolean" } }, required: ["action"] },
+});
+
 // Jarvis Code only, and only when a coder model is picked in the app.
 TOOLS.push({
   name: "write_code", where: "server", core: false,
@@ -1750,9 +1763,11 @@ const BUILTIN_PACKAGES = [
   { name: "models", title: "Local models", description: "Finding and downloading models; handing hard questions to the big one (think hard, its own setting).", tools: ["find_model", "download_model", "think_hard"], setting: "thinkHard" },
   { name: "files", title: "Files and repos", description: "Files anywhere on the PC: list, read, find, write, edit, move, delete to the Recycle Bin; repos and git.", tools: ["files", "repo"], setting: "files" },
   { name: "text-tools", title: "Text and code tools", description: "Precise work inside files: grep with regex, globs and context; reading and editing by line number; outlines; multi-edits; regex replace; diffs; tails.", tools: ["grep", "lines"], setting: "files" },
+  { name: "binary", title: "Binary files", description: "Looking inside files that aren't text: what a file really is, hashes, Windows EXE/DLL details (imports, exports, version, .NET or native), readable strings, byte and text search, hex dumps, archive listings, comparing two files. Read-only.", tools: ["binary"], setting: "files" },
   { name: "shell", title: "Command line", description: "PowerShell and cmd: run commands, background jobs and their output, which program is installed, running a project's tests.", tools: ["shell"], setting: "shell" },
   { name: "python", title: "Python", description: "The Pythons on the PC, virtual environments: create, install packages, run code, run tests.", tools: ["python"], setting: "shell" },
   { name: "programs", title: "Programs", description: "Installing, updating and removing software with winget, npm (global) and pip (user). Always asks first.", tools: ["programs"], setting: "shell" },
+  { name: "planning", title: "Planning and undo", description: "A visible step-by-step plan for long jobs, and undo for every file a conversation changed.", tools: ["todo", "checkpoint"] },
   { name: "coder", title: "Coder (Jarvis Code)", description: "Hands code writing to a second model picked in Jarvis Code.", tools: ["write_code"], setting: "files" },
   { name: "package-manager", title: "Package manager", description: "Listing, making, testing, enabling and installing tool packages.", tools: ["packages"], locked: true },
 ];
@@ -1786,7 +1801,7 @@ function toolOn(t) {
   const pk = builtinOf.get(name);
   if (pk && !builtinOn(pk)) return false;
   if (name === "think_hard") return !!settings.thinkHard;
-  if (name === "files" || name === "repo" || name === "write_code" || name === "grep" || name === "lines") return settings.files !== "off";
+  if (name === "files" || name === "repo" || name === "write_code" || name === "grep" || name === "lines" || name === "binary" || name === "checkpoint") return settings.files !== "off";
   if (name === "shell" || name === "python" || name === "programs") return settings.shell !== "off";
   return true;
 }
@@ -2445,7 +2460,9 @@ async function runServerTool(name, input, emit, conv) {
     case "history": return historyTool(a, emit, conv);
     case "files": case "repo": return fsTool(name, a, emit, conv);
     case "write_code": return coderTool(a, emit, conv);
-    case "grep": case "lines": case "shell": case "python": case "programs": return handsTool(name, a, emit, conv);
+    case "todo": return todoTool(a, emit, conv);
+    case "checkpoint": return checkpointTool(a, emit, conv);
+    case "grep": case "lines": case "binary": case "shell": case "python": case "programs": return handsTool(name, a, emit, conv);
     case "info": {
       const r = await info(String(a.about || "everything"), a);
       return [JSON.stringify(r), !!(r && r.error)];
@@ -2564,6 +2581,7 @@ const TOOL_GUIDE = {
   repo: "code projects: what a repo is and its state (overview first), git (status, log, diff, commit, branches, push, clone), a new repo, a new GitHub repo",
   grep: "finding text inside files: where something is used or defined, every TODO, which file mentions a word (regex, file globs, context lines)",
   lines: "precise work in a text file by line number: read a range or around a line, an outline of its functions, replace / insert / delete lines, several edits at once, regex replace, compare two files, the end of a log",
+  binary: "files that aren't text (a program, DLL, game data, archive, image): what it is, its version, what it imports, the text inside it, searching it, a hex dump",
   shell: "running a command or program on the PC (PowerShell or cmd), a build, a server in the background, whether a program is installed and its version, a project's tests",
   python: "Python: which Pythons there are, making a virtual environment, installing packages into one, running Python code or a script, running tests",
   programs: "installing, updating or removing a program or tool (winget, npm, pip): search for the exact id first",
@@ -2739,7 +2757,7 @@ async function claudeStep(conv, emit, signal, noTools) {
     max_tokens: conv.code ? 8192 : 4096,
     system: [{ type: "text", text: sys, cache_control: { type: "ephemeral" } }],
     tools: toolsFor(conv, true).map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
-    messages: withNudge(conv.messages, conv.nudge),
+    messages: withNudge(conv.messages, stepNote(conv)),
   };
   // The history holds tool calls, so the tools must stay declared; "none"
   // just stops new ones.
@@ -2832,7 +2850,7 @@ async function localStep(conv, emit, signal, noTools) {
   const window = ctxWindow(model);
   const sys = conv.code ? codeSystemPrompt(conv) : systemPrompt(!big);
   if (conv.code) fitContext(conv, window, sys.length);
-  const messages = toOpenAI(sys, withNudge(conv.messages, conv.nudge));
+  const messages = toOpenAI(sys, withNudge(conv.messages, stepNote(conv)));
   const tools = toolsFor(conv, big).map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } }));
   // A guess at the prompt's size until the server says (about 3.6 characters a token).
   const estIn = Math.round((JSON.stringify(messages).length + JSON.stringify(tools).length) / 3.6);
@@ -2912,10 +2930,22 @@ async function localStep(conv, emit, signal, noTools) {
     }
   }
   const content = [];
-  if (text) content.push({ type: "text", text });
-  for (const c of calls.filter(Boolean)) {
+  const real = calls.filter(Boolean);
+  // A model that writes its tool call into the reply instead of making it:
+  // take the call out of the text and make it (when it names a real tool).
+  let said = text;
+  if (!real.length && text && !noTools) {
+    const tc = agent.textCalls(text, new Set(tools.map((t) => t.function.name)));
+    if (tc) {
+      said = tc.rest;
+      for (const c of tc.calls) real.push({ id: "", name: c.name, args: JSON.stringify(c.input), fromText: true });
+      emit({ type: "status", text: "Read a tool call out of the reply" });
+    }
+  }
+  if (said) content.push({ type: "text", text: said });
+  for (const c of real) {
     let input = {};
-    try { input = c.args ? JSON.parse(c.args) : {}; } catch (e) { input = { _unparsed: c.args }; }
+    if (c.args) { const j = agent.repairJson(c.args); input = j && typeof j === "object" && !Array.isArray(j) ? j : { _unparsed: c.args }; }
     content.push({ type: "tool_use", id: c.id || "call_" + Math.random().toString(36).slice(2, 10), name: c.name, input });
   }
   const stop = content.some((b) => b.type === "tool_use") ? "tool_use" : (finish === "length" ? "max_tokens" : "end_turn");
@@ -2924,7 +2954,8 @@ async function localStep(conv, emit, signal, noTools) {
   const use = timings
     ? { in: (timings.prompt_n | 0) + (timings.cache_n | 0), cached: timings.cache_n | 0, out: timings.predicted_n | 0, ms, promptMs: Math.round(timings.prompt_ms || 0), genMs: Math.round(timings.predicted_ms || 0), window }
     : { in: estIn, cached: 0, out: pieces, ms, promptMs: firstAt ? firstAt - t0 : ms, genMs: firstAt ? Date.now() - firstAt : 0, window, est: true };
-  return { content, stop, model, usage: use };
+  // cut: it hit max_tokens, so a tool call in it may be missing its end.
+  return { content, stop, model, usage: use, cut: finish === "length" };
 }
 
 async function chooseProvider() {
@@ -3013,6 +3044,16 @@ function honestEmit(emit, hold) {
   };
 }
 
+// What rides on the latest message for this step only: a nudge, and the
+// plan while it has steps left (at the end, not in the system prompt, so the
+// prompt cache survives a plan that changes every step).
+function stepNote(conv) {
+  const parts = [];
+  if (conv.nudge) parts.push(conv.nudge);
+  if (conv.todo && conv.todo.some((t) => !t.done)) parts.push("(Your plan so far, from your todo tool:\n" + todoText(conv.todo) + "\nKeep it current: todo done when a step is finished.)");
+  return parts.join("\n\n") || null;
+}
+
 // The nudge rides on the latest user message for one step only; it is never
 // kept in the conversation.
 function withNudge(messages, nudge) {
@@ -3027,6 +3068,55 @@ function withNudge(messages, nudge) {
 
 // A coding task takes many small steps (read, read, edit, check...).
 const CODE_MAX_STEPS = 30;
+
+// ---- keeping the loop on its feet ---------------------------------------------------
+const LAST_NUDGE = "(Reminder from Jarvis's own system, not from the user: this is your last step for this request and tools are off. Don't start anything new. Say plainly what you did, what is left undone, and what the user should check or ask next.)";
+const EMPTY_NUDGE = "(Reminder from Jarvis's own system, not from the user: your last reply was empty. Answer the user, or call the tool you need.)";
+const CUT_MSG = "Your tool call was cut off by the length limit before it was complete, so it was NOT run. Send it again smaller: write a big file in parts (files write the first part, then files append the rest), or make several smaller edits.";
+// Calls that are fine to repeat (polling, showing).
+const REPEAT_OK = new Set(["shell output", "shell jobs", "todo show", "checkpoint list", "info pc", "info sensors"]);
+
+// The tools this conversation was actually offered (Code gets its own set).
+function offeredNames(conv) {
+  if (conv && conv.code) return new Set(toolsFor(conv, true).map((t) => t.name));
+  return new Set(TOOLS.filter(toolOn).map((t) => t.name).concat(packages.tools().map((t) => t.name)));
+}
+
+// Calls that only look: safe to run side by side.
+const READ_TOOLS = new Set(["web_search", "read_page", "image_search", "weather", "info", "recall", "history", "grep", "binary", "find_model"]);
+const READ_ACTIONS = {
+  files: /^(list|tree|read|find|info)$/, lines: /^(read|read_many|outline|tail|count|diff)$/, repo: /^overview$/,
+  python: /^(find|envs|packages|freeze|info)$/, programs: /^(search|info|installed|check)$/, shell: /^(which|jobs|output)$/,
+  todo: /^show$/, checkpoint: /^(list|diff)$/,
+};
+function readOnlyCall(u) {
+  if (READ_TOOLS.has(u.name)) return true;
+  const re = READ_ACTIONS[u.name];
+  return !!re && re.test(String((u.input && u.input.action) || ""));
+}
+
+// No tool may hang a turn forever. The command line has its own timeouts
+// (up to an hour); everything else gets a few minutes.
+function toolTimeout(name) {
+  if (/^(shell|python|programs|write_code)$/.test(name)) return 65 * 60 * 1000;
+  if (/^(think_hard|download_model|packages)$/.test(name)) return 15 * 60 * 1000;
+  return 4 * 60 * 1000;
+}
+function withTimeout(p, ms, name) {
+  let t;
+  return Promise.race([
+    p.finally(() => clearTimeout(t)),
+    new Promise((resolve) => { t = setTimeout(() => resolve([name + " took longer than " + Math.round(ms / 60000) + " minutes and was abandoned. Try a smaller request, or a different way.", true]), ms); }),
+  ]);
+}
+
+// How much of one tool result the model is given: it must leave room for the
+// rest of the conversation in its context.
+function outputCap(conv) {
+  if (conv.provider === "claude") return 40000;
+  const win = ctxWindow(localModelFor(conv)) || 16384;
+  return Math.max(6000, Math.min(30000, Math.round(win * 3.4 * (conv.code ? 0.3 : 0.2))));
+}
 
 async function runLoop(conv, emit, signal) {
   const maxSteps = conv.code ? CODE_MAX_STEPS : MAX_STEPS;
@@ -3043,6 +3133,8 @@ async function runLoop(conv, emit, signal) {
     const thinkAsk = step === 0 && !!settings.thinkHard && THINK_WORDS.test(heard);
     const hold = { claims: watch, all: (watch && LIVE.test(heard) && !KNOWLEDGE.test(heard)) || thinkAsk };
     const h = honestEmit(emit, hold);
+    // The last step runs without tools: ask for a wrap-up, not a dead end.
+    if (last && step > 0 && !conv.nudge) conv.nudge = LAST_NUDGE;
     const r = provider === "claude" ? await claudeStep(conv, h.emit, signal, last) : await localStep(conv, h.emit, signal, last);
     // Every request counts, a retried one too: it was spent.
     if (r.usage) {
@@ -3064,9 +3156,37 @@ async function runLoop(conv, emit, signal) {
       step--;
       continue;
     }
+    // Nothing at all came back (it happens with small local models): once a
+    // turn, ask again rather than answer "(no answer)".
+    const saidSomething = r.content.some((b) => b.type === "text" && b.text.trim());
+    if (!usedTool && !saidSomething && !last && !conv.emptyRetried && r.stop !== "refusal") {
+      conv.emptyRetried = true;
+      conv.nudge = EMPTY_NUDGE;
+      step--;
+      continue;
+    }
     conv.nudge = null;
     h.release();
     conv.model = r.model;
+    // Calls are fixed before they go into the history: a near-miss tool name,
+    // arguments of the wrong type or under another name, JSON that needed
+    // repair. What can't be fixed is answered with what is wrong.
+    const fixes = new Map();          // tool_use id -> { error } | { notes }
+    const cut = r.stop === "max_tokens" || !!r.cut;
+    const offered = offeredNames(conv);
+    for (const b of r.content) {
+      if (b.type !== "tool_use") continue;
+      if (cut) { fixes.set(b.id, { error: CUT_MSG }); continue; }
+      const fn = agent.fixName(b.name, offered);
+      if (fn.error) { fixes.set(b.id, { error: fn.error }); continue; }
+      const def = toolByName.get(fn.name) || packages.tools().find((t) => t.name === fn.name);
+      const fa = agent.fixArgs(b.input, def && def.input_schema, fn.preset);
+      b.name = fn.name;
+      if (fa.error) { fixes.set(b.id, { error: fa.error }); continue; }
+      b.input = fa.input;
+      const notes = [fn.note].concat(fa.notes || []).filter(Boolean);
+      if (notes.length) fixes.set(b.id, { notes });
+    }
     // Claude rejects an assistant turn with no content, and a conversation can
     // move to Claude after the local model came back with nothing at all.
     if (!r.content.length) r.content = [{ type: "text", text: "(no answer)" }];
@@ -3083,32 +3203,46 @@ async function runLoop(conv, emit, signal) {
     const uses = r.content.filter((b) => b.type === "tool_use");
     if (!uses.length) return "end";
 
-    // A tool call cut off by max_tokens may carry a truncated input. Do not
-    // run it on a guess.
-    if (r.stop === "max_tokens") return "end";
+    // A tool call cut off by max_tokens may carry a truncated input: it is
+    // never run on a guess (fixes holds CUT_MSG for it, so the model hears
+    // why and can send it in smaller pieces).
 
     const serverUses = [], clientUses = [];
     for (const u of uses) {
       const def = toolByName.get(u.name);
-      if (def && def.where === "client") clientUses.push(u); else serverUses.push(u);
+      if (def && def.where === "client" && !(fixes.get(u.id) || {}).error) clientUses.push(u); else serverUses.push(u);
       conv.log.tools.push(u.name);
     }
-    const results = await Promise.all(serverUses.map(async (u) => {
+    if (!conv.callCounts) conv.callCounts = new Map();
+    const runOne = async (u) => {
       emit({ type: "tool", id: u.id, name: u.name, input: u.input, status: "running" });
       const tStart = Date.now();
       let out, isErr = false;
+      const fx = fixes.get(u.id) || {};
+      const key = agent.callKey(u.name, u.input);
+      const seen = (conv.callCounts.get(key) || 0) + 1;
+      conv.callCounts.set(key, seen);
       try {
-        if (!toolByName.has(u.name) && !packages.has(u.name)) [out, isErr] = ["There is no tool called " + u.name, true];
+        if (fx.error) [out, isErr] = [fx.error, true];
+        else if (!toolByName.has(u.name) && !packages.has(u.name)) [out, isErr] = ["There is no tool called " + u.name, true];
+        else if (seen >= 3 && !REPEAT_OK.has(u.name + " " + ((u.input && u.input.action) || ""))) {
+          // The same call a third time in one turn: a loop. Its answer won't change.
+          [out, isErr] = ["You have made exactly this call " + (seen - 1) + " times already this turn; it will give the same answer. Use the result you have, change the call, or tell the user what is blocking you.", true];
+        }
         else if (u.name === "web_search" && ++conv.searches > MAX_SEARCHES) {
           [out, isErr] = ["You have already searched " + MAX_SEARCHES + " times for this question. Do not search again: " +
             "answer now from the results you have (read_page one of them if you need detail), or say you could not find it.", true];
         }
-        else [out, isErr] = await runServerTool(u.name, u.input, (ev) => {
+        else [out, isErr] = await withTimeout(runServerTool(u.name, u.input, (ev) => {
           // Cards go to the panel now and into the chat log with the exchange.
           if (ev.type === "card" && conv.log.cards) conv.log.cards.push(ev.card);
           emit(ev);
-        }, conv);
+        }, conv), toolTimeout(u.name), u.name);
       } catch (e) { out = "Tool failed: " + e.message; isErr = true; }
+      // What was fixed in the call is said, so the model learns the right form.
+      if (fx.notes && fx.notes.length) out = "(Your call was adjusted: " + fx.notes.join("; ") + ")\n" + String(out == null ? "" : out);
+      // A result bigger than the context can hold is cut to its head and tail.
+      out = agent.capOutput(out, outputCap(conv));
       emit({ type: "tool", id: u.id, name: u.name, status: "done", ok: !isErr });
       // Jarvis Code shows what each step came back with.
       if (conv.code) emit({ type: "tool-result", id: u.id, name: u.name, ok: !isErr, text: String(out == null ? "" : out).slice(0, 4000) });
@@ -3116,7 +3250,12 @@ async function runLoop(conv, emit, signal) {
       countTool(conv, u.name, !isErr, Date.now() - tStart);
       meter(conv, emit, { stage: "tool", model: conv.model });
       return { type: "tool_result", tool_use_id: u.id, content: String(out == null ? "" : out), ...(isErr ? { is_error: true } : {}) };
-    }));
+    };
+    // Reads run side by side; anything that changes something runs in the
+    // order it was asked (two edits to one file at once would clobber).
+    let results;
+    if (serverUses.every(readOnlyCall)) results = await Promise.all(serverUses.map(runOne));
+    else { results = []; for (const u of serverUses) results.push(await runOne(u)); }
 
     // Handed to the big model: that is the answer for now. Ending here, rather
     // than asking the model for an "on it", keeps the router free for it.
@@ -3328,35 +3467,184 @@ function settlePermission(id, answer) {
 
 async function fsTool(name, a, emit, conv) {
   if (settings.files === "off") return ["Files access is switched off in Jarvis settings.", true];
+  const fa = fileCtxAsk(conv, emit);
   const ctx = {
     cwd: conv && conv.fsCwd,
     // What a read may return: a small local model has a small context.
     limit: conv && conv.provider === "claude" ? 30000 : 9000,
-    ask: (req) => askPermission(conv, emit, req),
+    ask: fa.ask,
   };
   try {
     const r = name === "files" ? await fileTools.files(a, ctx) : await fileTools.repo(a, ctx);
     if (conv && ctx.cwd) conv.fsCwd = ctx.cwd;
-    return r;
+    return fa.after(r);
   } catch (e) {
     return [(e.code === "EACCES" || e.code === "EPERM" ? "Windows won't let me: " : "That failed: ") + e.message, true];
   }
 }
 
+// ---- the plan (todo) ------------------------------------------------------------------
+function todoText(items) {
+  return items.map((t, i) => (t.done ? "[x] " : "[ ] ") + (i + 1) + ". " + t.text).join("\n");
+}
+async function todoTool(a, emit, conv) {
+  if (!conv) return ["No conversation.", true];
+  const list = conv.todo || (conv.todo = []);
+  const act = String(a.action || "show");
+  const nums = () => (a.n != null ? [a.n] : (a.items || []).map((x) => parseInt(x, 10))).filter((n) => n >= 1 && n <= list.length);
+  if (act === "set") {
+    const items = (a.items || []).map((x) => String(x).trim()).filter(Boolean).slice(0, 30);
+    if (!items.length) return ["set needs items: the steps, in order.", true];
+    conv.todo = items.map((text) => ({ text: text.slice(0, 200), done: false }));
+  } else if (act === "done") {
+    const n = nums();
+    if (!n.length) return ["done needs n: a step number from 1 to " + list.length + ".", true];
+    for (const k of n) list[k - 1].done = true;
+  } else if (act === "add") {
+    if (!a.text) return ["add needs text.", true];
+    list.push({ text: String(a.text).slice(0, 200), done: false });
+  } else if (act === "remove") {
+    const n = nums().sort((x, y) => y - x);
+    if (!n.length) return ["remove needs n.", true];
+    for (const k of n) list.splice(k - 1, 1);
+  }
+  const items = conv.todo;
+  emit({ type: "todo", items });
+  const left = items.filter((t) => !t.done).length;
+  return [(items.length ? todoText(items) : "(no plan)") + "\n" + (items.length ? (left ? left + " step" + (left === 1 ? "" : "s") + " left." : "All done.") : "")];
+}
+
+// ---- checkpoints: each file as it was before this conversation changed it -------------
+const SNAP_FILE_MAX = 10 * 1024 * 1024, SNAP_TOTAL_MAX = 200 * 1024 * 1024;
+function snapshot(conv, p) {
+  const snaps = conv.snaps || (conv.snaps = new Map());
+  const k = p.toLowerCase();
+  if (snaps.has(k)) return;
+  let st = null;
+  try { st = fs.statSync(p); } catch (e) {}
+  if (st && !st.isFile()) return;
+  if (!st) { snaps.set(k, { path: p, existed: false, at: Date.now() }); return; }
+  if (st.size > SNAP_FILE_MAX || (conv.snapBytes || 0) + st.size > SNAP_TOTAL_MAX) { snaps.set(k, { path: p, existed: true, tooBig: true, at: Date.now() }); return; }
+  try { const data = fs.readFileSync(p); snaps.set(k, { path: p, existed: true, data, at: Date.now() }); conv.snapBytes = (conv.snapBytes || 0) + data.length; } catch (e) {}
+}
+// The ask every file tool uses: the panel's OK, then (for a change) a
+// snapshot first, and a note when the file changed on disk since it was
+// last read here (someone else edited it).
+function fileCtxAsk(conv, emit) {
+  const notes = [], touched = [];
+  const ask = async (req) => {
+    const ok = await askPermission(conv, emit, req);
+    if (!ok || !conv || !req.path || /, /.test(req.path)) return ok;
+    const p = req.path, k = p.toLowerCase();
+    let st = null;
+    try { st = fs.statSync(p); } catch (e) {}
+    if (st && !st.isFile()) return ok;
+    const seen = conv.seen || (conv.seen = new Map());
+    if (req.write) {
+      const was = seen.get(k);
+      if (st && was && st.mtimeMs > was + 2) notes.push("Note: " + path.basename(p) + " had changed on disk since you last read it (edited outside this chat). Read it again before more changes.");
+      snapshot(conv, p);
+      // Our own write is about to change it: no warning about that until the
+      // next read here records it again.
+      seen.set(k, Number.MAX_SAFE_INTEGER);
+    }
+    touched.push(p);
+    return ok;
+  };
+  // After the tool: what this conversation now knows each file looks like.
+  const after = (r) => {
+    for (const p of touched) { try { conv.seen.set(p.toLowerCase(), fs.statSync(p).mtimeMs); } catch (e) { if (conv.seen) conv.seen.delete(p.toLowerCase()); } }
+    if (notes.length && Array.isArray(r)) r = [notes.join("\n") + "\n" + r[0], r[1]];
+    return r;
+  };
+  return { ask, after };
+}
+
+async function checkpointTool(a, emit, conv) {
+  const snaps = [...((conv && conv.snaps) || new Map()).values()];
+  const act = String(a.action || "list");
+  const now = (s) => {
+    let cur = null;
+    try { cur = fs.readFileSync(s.path); } catch (e) {}
+    if (!s.existed) return cur ? "created in this conversation" : "created, and gone again";
+    if (s.tooBig) return cur ? "changed (too big to keep a copy: can't restore)" : "deleted (too big to keep a copy)";
+    if (!cur) return "deleted (or moved) in this conversation";
+    return cur.equals(s.data) ? "same as before (no change left)" : "changed";
+  };
+  if (act === "list") {
+    if (!snaps.length) return ["This conversation hasn't changed any files."];
+    return ["Files this conversation changed (originals kept from before the first change):\n" + snaps.map((s) => "- " + s.path + ": " + now(s)).join("\n")];
+  }
+  const want = a.all ? snaps : snaps.filter((s) => a.path && s.path.toLowerCase() === fileTools.resolve(a.path, { cwd: conv && conv.fsCwd }).toLowerCase());
+  if (!want.length) return [a.all ? "Nothing to restore." : "No checkpoint for " + (a.path || "(no path)") + ". checkpoint list shows the files this conversation changed.", true];
+  if (act === "diff") {
+    const s = want[0];
+    if (!s.existed) return [s.path + " was created in this conversation; all of it is new."];
+    if (s.tooBig) return [s.path + " was too big to keep a copy of.", true];
+    const tmp = path.join(os.tmpdir(), "jarvis-before-" + Date.now() + path.extname(s.path));
+    fs.writeFileSync(tmp, s.data);
+    try {
+      const r = await fileTools.run("git", ["diff", "--no-index", "--no-color", "--", tmp, s.path], undefined, 30000);
+      return [(r.out.trim() || "No difference: it is as it was.").replace(new RegExp(tmp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\\/g, "[\\\\/]"), "g"), "(before)").slice(0, 12000)];
+    } finally { try { fs.unlinkSync(tmp); } catch (e) {} }
+  }
+  if (act === "restore") {
+    const can = want.filter((s) => !s.tooBig);
+    if (!can.length) return ["Those files were too big to keep copies of; they can't be restored here (git may help: repo git restore).", true];
+    const ok = await askPermission(conv, emit, { tool: "checkpoint", action: "restore", write: true, title: "Undo this chat's changes to " + (can.length === 1 ? path.basename(can[0].path) : can.length + " files"), path: can.length === 1 ? can[0].path : "", detail: can.map((s) => s.path + " — " + now(s)).join("\n") });
+    if (!ok) return ["The user said no.", true];
+    const done = [];
+    for (const s of can) {
+      try {
+        if (s.existed) { fs.mkdirSync(path.dirname(s.path), { recursive: true }); fs.writeFileSync(s.path, s.data); done.push("restored " + s.path); }
+        else if (fs.existsSync(s.path)) { const r = await fileTools.recycle(s.path, false); done.push((r.ok ? "moved to the Recycle Bin: " : "couldn't remove: ") + s.path); }
+        if (conv.seen) try { conv.seen.set(s.path.toLowerCase(), fs.statSync(s.path).mtimeMs); } catch (e) { conv.seen.delete(s.path.toLowerCase()); }
+      } catch (e) { done.push("failed " + s.path + ": " + e.message); }
+    }
+    return [done.join("\n")];
+  }
+  return ["Unknown checkpoint action " + act + ". list, diff, restore.", true];
+}
+
+// ---- project notes: the instructions a project keeps for agents -------------------------
+const NOTE_FILES = ["JARVIS.md", "AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md", ".cursorrules"];
+const noteCache = new Map();
+function projectNotes(root) {
+  for (const f of NOTE_FILES) {
+    const p = path.join(root, f);
+    let st;
+    try { st = fs.statSync(p); } catch (e) { continue; }
+    if (!st.isFile()) continue;
+    const c = noteCache.get(p);
+    if (c && c.mtime === st.mtimeMs) return c;
+    let text = "";
+    try { text = fs.readFileSync(p, "utf8"); } catch (e) { continue; }
+    const r = { file: f, mtime: st.mtimeMs, text: text.length > 5000 ? text.slice(0, 5000) + "\n… (the rest is in " + f + ")" : text };
+    noteCache.set(p, r);
+    return r;
+  }
+  return null;
+}
+
 // grep and lines (precise file work), shell, python and programs (the command
 // line): the same asking-first as files, each with its own setting.
 async function handsTool(name, a, emit, conv) {
-  const isText = name === "grep" || name === "lines";
+  const isText = name === "grep" || name === "lines" || name === "binary";
   if (isText && settings.files === "off") return ["Files access is switched off in Jarvis settings.", true];
   if (!isText && settings.shell === "off") return ["The command line is switched off in Jarvis settings (Shell).", true];
+  const fa = isText ? fileCtxAsk(conv, emit) : null;
   const ctx = {
     cwd: conv && conv.fsCwd,
     limit: conv && conv.provider === "claude" ? 30000 : conv && conv.code ? 12000 : 9000,
-    ask: (req) => askPermission(conv, emit, req),
+    ask: fa ? fa.ask : (req) => askPermission(conv, emit, req),
     signal: conv && conv.signal,
   };
+  if (fa) { try { return fa.after(await handsRun(name, a, ctx, conv)); } catch (e) { return [(e.code === "EACCES" || e.code === "EPERM" ? "Windows won't let me: " : "That failed: ") + e.message, true]; } }
+  return handsRun(name, a, ctx, conv);
+}
+async function handsRun(name, a, ctx, conv) {
   try {
-    const r = name === "grep" ? await textTools.grep(a, ctx) : name === "lines" ? await textTools.lines(a, ctx)
+    const r = name === "grep" ? await textTools.grep(a, ctx) : name === "lines" ? await textTools.lines(a, ctx) : name === "binary" ? await binTools.binary(a, ctx)
       : name === "shell" ? await shellTools.shell(a, ctx) : name === "python" ? await shellTools.python(a, ctx) : await shellTools.programs(a, ctx);
     if (conv && ctx.cwd) conv.fsCwd = ctx.cwd;
     return r;
@@ -3487,7 +3775,8 @@ async function coderTool(a, emit, conv) {
   if (think.job) return ["The big model is thinking, so the coder can't load now. Write the code yourself.", true];
   const task = String(a.task || "").trim();
   if (!task) return ["write_code needs a task.", true];
-  const fctx = { cwd: conv.fsCwd || conv.code.root, limit: 200000, ask: (req) => askPermission(conv, emit, req) };
+  const fa = fileCtxAsk(conv, emit);
+  const fctx = { cwd: conv.fsCwd || conv.code.root, limit: 200000, ask: fa.ask };
   const target = a.path ? fileTools.resolve(a.path, fctx) : null;
   let exists = false;
   if (target) { try { exists = fs.statSync(target).isFile(); } catch (e) {} }
@@ -3587,7 +3876,7 @@ async function codeProject(root, touch) {
   return { ok: true, ...e };
 }
 
-const CODE_TOOLS = new Set(["files", "repo", "grep", "lines", "shell", "python", "programs", "web_search", "read_page", "packages"]);
+const CODE_TOOLS = new Set(["files", "repo", "grep", "lines", "binary", "todo", "checkpoint", "shell", "python", "programs", "web_search", "read_page", "packages"]);
 function toolsFor(conv, big) {
   if (conv && conv.code) return TOOLS.filter((t) => (CODE_TOOLS.has(t.name) || (t.name === "write_code" && conv.coder)) && toolOn(t));
   // His own, then the enabled packages' (a package tool is core unless it says not).
@@ -3608,11 +3897,15 @@ function codeSystemPrompt(conv) {
     "6. Every change waits for " + who() + "'s OK on the panel unless they turned that off. If they say no, stop and ask what they want instead.",
     "7. Relative paths are inside the project. If a tool fails, read the error and try a different way, two or three times at most, then explain.",
     "8. A question about the code needs reading, not changing: answer it from what the files say, with file names and line numbers.",
+    "9. A job of more than three or four steps: write the plan first with todo set, and tick steps with todo done as you finish them. If a change goes wrong, checkpoint restore puts a file back as it was before this conversation touched it (checkpoint list shows what you changed).",
+    "10. Files that aren't text (a DLL, an exe, game data, an archive): the binary tool (info, strings, search, hex, pe, zip).",
     ...(conv.coder ? [
-      "9. You have a coder (write_code): a model that writes code far better than you but cannot use tools. You plan, look and check; it writes. For any new code or change bigger than a line or two, call write_code instead of writing it yourself: first find and read what matters, then give it a complete task, the files it must see and the path to change. It applies its own edits. Afterwards check its work (repo git with \"diff\", or read the changed part) and fix small slips with files edit.",
+      "11. You have a coder (write_code): a model that writes code far better than you but cannot use tools. You plan, look and check; it writes. For any new code or change bigger than a line or two, call write_code instead of writing it yourself: first find and read what matters, then give it a complete task, the files it must see and the path to change. It applies its own edits. Afterwards check its work (repo git with \"diff\", or read the changed part) and fix small slips with files edit.",
     ] : []),
     "",
     "Be direct and specific. No filler.",
+    // The project's own instructions for agents, when it keeps some.
+    ...((() => { const n = projectNotes(c.root); return n ? ["", "Project notes from " + n.file + " (the project's own instructions; follow them):", n.text] : []; })()),
   ].join("\n");
 }
 
@@ -3832,6 +4125,7 @@ async function handleTurn(req, res) {
         conv.log = { heard: text, reply: "", tools: [], cards: [], at: Date.now(), usage: freshUsage() };
         conv.searches = 0;
         conv.nudged = null; conv.nudge = null;
+        conv.callCounts = new Map(); conv.emptyRetried = false;
         // A new conversation: does it continue a chat? Its history comes first.
         if (!code && !conv.chatId && !conv.messages.length) {
           const r = routeChat(text);

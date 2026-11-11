@@ -41,6 +41,8 @@ of your own can't use the name of a built-in tool.
 | models | find_model, download_model, think_hard | local models |
 | files | files, repo | files anywhere, repos and git |
 | text-tools | grep, lines | grep with regex and context; read and edit by line number, outlines, multi-edits, regex replace, diffs, tails |
+| binary | binary | inside files that aren't text: kind, hashes, EXE/DLL details, strings, byte search, hex, archive listings, comparing (read-only) |
+| planning | todo, checkpoint | a visible plan for long jobs; undo for files a conversation changed |
 | shell | shell | PowerShell and cmd: run, background jobs, which, a project's tests |
 | python | python | Pythons, virtual environments, pip, running code and tests |
 | programs | programs | installing software with winget, npm and pip (always asks) |

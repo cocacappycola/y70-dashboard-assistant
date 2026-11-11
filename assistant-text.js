@@ -25,7 +25,7 @@ async function loadText(p) {
   if (st.isDirectory()) return { error: p + " is a folder." };
   if (st.size > 50 * 1024 * 1024) return { error: p + " is " + F.size(st.size) + ", too big." };
   const buf = await fsp.readFile(p);
-  if (F.isBinary(buf)) return { error: p + " is a binary file, not text." };
+  if (F.isBinary(buf)) return { error: p + " is a binary file, not text. Use the binary tool (info, strings, search, hex, pe, zip)." };
   let text = buf.toString("utf8");
   const bom = text.charCodeAt(0) === 0xfeff;
   if (bom) text = text.slice(1);
@@ -39,6 +39,12 @@ function joinText(f, lines) {
   return (f.bom ? "﻿" : "") + lines.join(f.eol) + (f.endsNl && lines.length ? f.eol : "");
 }
 const numbered = (lines, from) => lines.map((l, i) => String(from + i).padStart(5) + "  " + l).join("\n");
+// The changed lines with two around them, after an edit (long ones shortened).
+function around(lines, start, count) {
+  const a = Math.max(1, start - 2), b = Math.min(lines.length, start + Math.max(0, count - 1) + 2);
+  if (b - a > 40) return numbered(lines.slice(a - 1, a + 17), a) + "\n  …\n" + numbered(lines.slice(b - 18, b), b - 17);
+  return b >= a ? numbered(lines.slice(a - 1, b), a) : "(the file is empty)";
+}
 const splitLines = (s) => String(s == null ? "" : s).replace(/\r?\n$/, "").split(/\r?\n/);
 
 // A short diff for the approval card.
@@ -238,7 +244,7 @@ async function lines(a, ctx) {
     const neu = act === "delete" ? [] : splitLines(a.content);
     const next = f.lines.slice(0, from - 1).concat(neu, f.lines.slice(to));
     if (!(await save(next, (act === "delete" ? "Delete" : "Replace") + " lines " + from + "-" + to + " of " + path.basename(p), hunk(old, neu, from)))) return no;
-    return [(act === "delete" ? "Deleted" : "Replaced") + " lines " + from + "-" + to + " (" + old.length + " → " + neu.length + " lines). The file has " + next.length + " lines now; numbers after line " + to + " moved by " + (neu.length - old.length) + "."];
+    return [(act === "delete" ? "Deleted" : "Replaced") + " lines " + from + "-" + to + " (" + old.length + " → " + neu.length + " lines). The file has " + next.length + " lines now; numbers after line " + to + " moved by " + (neu.length - old.length) + ".\nIt reads now:\n" + around(next, from, neu.length)];
   }
   if (act === "insert") {
     const at = a.at == null || (a.at | 0) <= 0 || (a.at | 0) > n ? n + 1 : a.at | 0;
@@ -246,7 +252,7 @@ async function lines(a, ctx) {
     if (!a.content && a.content !== "") return ["insert needs content.", true];
     const next = f.lines.slice(0, at - 1).concat(neu, f.lines.slice(at - 1));
     if (!(await save(next, "Insert " + neu.length + " line" + (neu.length === 1 ? "" : "s") + " at line " + at + " of " + path.basename(p), hunk([], neu, at)))) return no;
-    return ["Inserted " + neu.length + " lines " + (at > n ? "at the end" : "before what was line " + at) + ". The file has " + next.length + " lines now."];
+    return ["Inserted " + neu.length + " lines " + (at > n ? "at the end" : "before what was line " + at) + ". The file has " + next.length + " lines now.\nIt reads now:\n" + around(next, at, neu.length)];
   }
   if (act === "multi_edit") {
     const edits = Array.isArray(a.edits) ? a.edits.slice(0, 40) : [];

@@ -194,7 +194,7 @@ async function files(a, ctx) {
     if (st.size > 50 * 1024 * 1024) return [p + " is " + size(st.size) + ", too big to read here.", true];
     if (!(await ask("Read " + path.basename(p), size(st.size)))) return ["The user said no.", true];
     const buf = await fsp.readFile(p);
-    if (isBinary(buf)) return [p + " is a binary file (" + size(st.size) + "), not text.", true];
+    if (isBinary(buf)) return [p + " is a binary file (" + size(st.size) + "), not text. Look inside it with the binary tool: binary info (what it is), strings (the readable text in it), search, hex, pe (a Windows EXE/DLL), zip (an archive).", true];
     const all = buf.toString("utf8").split(/\r?\n/);
     const from = Math.max(1, a.from | 0 || 1);
     const want = Math.max(1, Math.min(2000, a.lines | 0 || 400));
@@ -276,7 +276,17 @@ async function files(a, ctx) {
     const next = a.all ? text.split(find).join(replace) : text.replace(find, () => replace);
     await fsp.writeFile(p, next);
     ctx.cwd = path.dirname(p);
-    return ["Changed " + (a.all ? count + " places" : "it") + " in " + p + "."];
+    // Show the edited place, so a slip is seen without reading it again.
+    let shown = "";
+    if (!a.all) {
+      const at = text.indexOf(find);
+      const startLine = text.slice(0, at).split(/\r?\n/).length;
+      const nl = next.split(/\r?\n/);
+      const span = replace.split(/\r?\n/).length;
+      const s = Math.max(1, startLine - 2), e = Math.min(nl.length, startLine + span + 1);
+      if (e - s <= 40) shown = "\nIt reads now:\n" + nl.slice(s - 1, e).map((l, i) => String(s + i).padStart(5) + "  " + l).join("\n");
+    }
+    return ["Changed " + (a.all ? count + " places" : "it") + " in " + p + "." + shown];
   }
 
   if (act === "mkdir") {
@@ -537,4 +547,4 @@ async function gitDiff(root, file) {
   return { ok: r.ok, text: r.out, error: r.ok ? null : r.err.trim() };
 }
 
-module.exports = { init, files, repo, TOOL_DEFS, resolve, guard, listDir, readText, gitStatus, gitDiff, run, findRepoRoot, SKIP_DIRS, walk, globRe, isBinary, clip, preview, size, stat, splitArgs };
+module.exports = { init, files, repo, TOOL_DEFS, resolve, guard, listDir, readText, gitStatus, gitDiff, run, findRepoRoot, SKIP_DIRS, recycle, walk, globRe, isBinary, clip, preview, size, stat, splitArgs };

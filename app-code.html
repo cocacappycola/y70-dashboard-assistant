@@ -59,6 +59,14 @@
     .line .ui-input { flex: 1; min-width: 0; }
 
     /* ---- The conversation ---- */
+    #todo { flex-shrink: 0; max-height: 30vh; overflow-y: auto; padding: 6px 12px 8px; border-bottom: 1px solid var(--t-line, #2c2c33); background: var(--t-bg-2, #101014); font-size: 12px; }
+    #todo .th { display: flex; gap: 8px; align-items: center; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--t-sub, #a6a6b3); cursor: pointer; }
+    #todo .th .n { margin-left: auto; font-weight: 600; letter-spacing: 0; text-transform: none; }
+    #todo .it { display: flex; gap: 7px; padding: 2px 0; color: var(--t-text, #e8e8ee); }
+    #todo .it.done { color: var(--t-muted, #7a7a85); text-decoration: line-through; }
+    #todo .it .b { flex-shrink: 0; width: 14px; text-align: center; }
+    #todo .it.next { font-weight: 650; }
+    #todo.shut .it { display: none; }
     #meter { flex-shrink: 0; padding: 6px 12px 7px; border-bottom: 1px solid var(--t-line, #2c2c33); background: var(--t-bg-2, #101014); font-size: 11px; color: var(--t-sub, #a6a6b3); font-variant-numeric: tabular-nums; }
     #meter[hidden] { display: none; }
     #meter .bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; margin: 4px 0 3px; }
@@ -158,6 +166,7 @@
       <button data-v="changes">Changes<span class="n" id="nchg" hidden></span></button>
     </div>
     <div id="meter" hidden></div>
+    <div id="todo" hidden></div>
     <div id="v-projects" class="view show"><div class="pad" id="projects"></div></div>
     <div id="v-chat" class="view"><div class="pad" id="log"></div></div>
     <div id="v-files" class="view"></div>
@@ -236,6 +245,7 @@
       $("#tabs").hidden = !project || v === "projects";
       $("#compose").hidden = v !== "chat";
       $("#meter").hidden = v !== "chat" || !liveMeter;
+      $("#todo").hidden = v !== "chat" || !todoItems.length;
       $("#b-proj").textContent = v === "projects" && project ? "Back" : "Projects";
       if (v === "files" && !$("#v-files").firstChild) openDir(project.root);
       if (v === "changes") loadChanges();
@@ -403,6 +413,7 @@
     async function enterProject(p, g) {
       if (busy) { busy.abort(); busy = null; }
       project = p; git = g; conv = null;
+      drawTodo([]);
       store.set("project", p.root);
       $("#v-files").innerHTML = ""; $("#v-changes").innerHTML = "";
       setView("chat");
@@ -452,12 +463,15 @@
       read_page: (a) => "Read " + (a.url || ""),
       grep: (a) => "Grep \"" + String(a.pattern || "").slice(0, 50) + "\" in " + base(a.path || ".") + (a.include ? " (" + a.include + ")" : ""),
       lines: (a) => ({ read: "Read", read_many: "Read several", outline: "Outline", tail: "Tail", count: "Count", diff: "Diff", replace: "Replace lines in", insert: "Insert into", delete: "Delete lines in", multi_edit: "Edits to", regex_replace: "Regex replace in" }[a.action] || a.action) + " " + (a.action === "read_many" ? (a.reads || []).map((r) => base(r.path || "")).join(", ") : base(a.path || ".")) + (a.from ? " · " + a.from + (a.to ? "-" + a.to : "") : a.line ? " · around " + a.line : ""),
+      binary: (a) => ({ info: "What is", pe: "Inside the program", strings: "Text inside", search: "Search inside", hex: "Hex of", zip: "Files in", compare: "Compare" }[a.action] || a.action) + " " + base(a.path || "") + (a.action === "search" ? " for " + (a.text ? "\"" + a.text + "\"" : a.bytes || "") : a.action === "hex" && a.offset != null ? " @ " + a.offset : a.action === "strings" && a.filter ? " matching " + a.filter : ""),
       shell: (a) => ({ run: "", start: "Start: ", output: "Output of ", stop: "Stop ", jobs: "Jobs", which: "Which ", test: "Run tests" }[a.action] || "") + (a.action === "output" || a.action === "stop" ? a.id || "" : a.action === "which" ? a.name || a.command || "" : String(a.command || "").slice(0, 90)),
       python: (a) => "Python " + (a.action || "") + (a.packages && a.packages.length ? " " + a.packages.join(" ") : "") + (a.env ? " · " + base(a.env) : "") + (a.file ? " " + base(a.file) : a.module ? " -m " + a.module : ""),
       programs: (a) => ({ search: "Search programs", info: "Program info", installed: "Installed programs", check: "Check", install: "Install", upgrade: "Update", uninstall: "Uninstall" }[a.action] || a.action) + " " + (a.id || a.query || a.name || "") + (a.manager && a.manager !== "winget" ? " (" + a.manager + ")" : ""),
+      todo: (a) => ({ set: "Plan: " + (a.items || []).length + " steps", done: "Done: step " + (a.n || (a.items || []).join(", ")), add: "Plan + " + (a.text || ""), remove: "Plan − step " + (a.n || ""), show: "Plan" }[a.action] || "Plan"),
+      checkpoint: (a) => ({ list: "Files changed in this chat", diff: "What changed in " + base(a.path || ""), restore: "Undo changes to " + (a.all ? "all files" : base(a.path || "")) }[a.action] || "Checkpoint"),
       write_code: (a) => "Coder: " + ({ edit: "change ", write: "write " }[a.mode] || (a.path ? "work on " : "answer")) + (a.path ? base(a.path) : "") + " · " + String(a.task || "").slice(0, 70),
     };
-    const ICON = { files: "📄", repo: "⎇", web_search: "🔎", read_page: "🌐", write_code: "✍", grep: "🔍", lines: "≡", shell: "›_", python: "🐍", programs: "⬇" };
+    const ICON = { files: "📄", repo: "⎇", web_search: "🔎", read_page: "🌐", write_code: "✍", grep: "🔍", lines: "≡", binary: "⬢", todo: "☑", checkpoint: "↺", shell: "›_", python: "🐍", programs: "⬇" };
     function stepDetail(name, a) {
       if (name === "files" && a.action === "edit") return '<pre class="diff">' + diffHtml(String(a.find || "").split("\n").map((l) => "-" + l).join("\n") + "\n" + String(a.replace || "").split("\n").map((l) => "+" + l).join("\n")) + "</pre>";
       if (name === "files" && (a.action === "write" || a.action === "append")) return "<pre>" + esc(String(a.content || "").slice(0, 6000)) + "</pre>";
@@ -466,6 +480,20 @@
       if (name === "lines" && (a.action === "replace" || a.action === "insert") && a.content) return "<pre>" + esc(String(a.content).slice(0, 6000)) + "</pre>";
       if (name === "write_code") return "<pre>" + esc(String(a.task || "") + (a.files && a.files.length ? "\n\nFiles: " + a.files.join(", ") : "")) + "</pre>";
       return "";
+    }
+
+    // His plan for the job, as he keeps it (todo tool). Tap the heading to fold it.
+    let todoItems = [];
+    function drawTodo(items) {
+      todoItems = items || [];
+      const box = $("#todo");
+      box.hidden = !todoItems.length || view !== "chat";
+      if (!todoItems.length) return;
+      const left = todoItems.filter((t) => !t.done).length;
+      const next = todoItems.findIndex((t) => !t.done);
+      box.innerHTML = '<div class="th">Plan<span class="n">' + (left ? (todoItems.length - left) + " of " + todoItems.length + " done" : "all done ✓") + "</span></div>" +
+        todoItems.map((t, i) => '<div class="it' + (t.done ? " done" : i === next ? " next" : "") + '"><span class="b">' + (t.done ? "✓" : i === next ? "▸" : "○") + "</span><span>" + esc(t.text) + "</span></div>").join("");
+      box.querySelector(".th").addEventListener("click", () => box.classList.toggle("shut"));
     }
 
     let liveMeter = null;
@@ -535,6 +563,8 @@
               const row = rows.get(ev.id);
               if (row) { row.classList.remove("run"); row.classList.add(ev.ok ? "ok" : "bad"); row.querySelector(".st").textContent = ev.ok ? "done" : "failed"; }
               if (/^(write|edit|append|move|copy|delete|mkdir)$/.test(((ev.input || {}).action) || "") || ev.name === "repo") refreshGit();
+            } else if (ev.type === "todo") {
+              drawTodo(ev.items);
             } else if (ev.type === "tool-result") {
               const row = rows.get(ev.id);
               if (row && ev.text) row.querySelector(".bd").appendChild(el("pre", ev.ok ? "" : "err", esc(ev.text)));
