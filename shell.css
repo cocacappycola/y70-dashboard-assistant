@@ -95,6 +95,7 @@ html, body {
 .tools-ico   { background: var(--u-accent, #e8d44d); color: var(--u-accent-ink, #000); }
 .discord-ico { background: var(--d-accent, #5865f2); color: var(--d-accent-ink, #fff); }
 .web-ico     { background: var(--v-accent, #ff3b5c); color: var(--v-accent-ink, #fff); }
+.code-ico    { background: radial-gradient(circle at 35% 30%, #b9a6ff 0, #a85cd6 55%, #26124a 100%); color: #fff; font-weight: 700; }
 .scene-ico   { background: var(--panel-2); color: var(--trim); border: 1px solid var(--trim-line); }
 
 .scene-tile.active .scene-ico { background: var(--trim); color: var(--trim-ink); border-color: transparent; }

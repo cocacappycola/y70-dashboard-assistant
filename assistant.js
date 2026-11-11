@@ -3616,6 +3616,91 @@ function codeSystemPrompt(conv) {
   ].join("\n");
 }
 
+// ---- the folder picker and "make it a git repo" -----------------------------------
+// Folders only, each marked if it is a repo; "" = This PC (drives and the
+// usual places). For the folder being looked at: is it a repo, inside one,
+// what it holds, and which .gitignore would suit it.
+async function codeBrowse(raw) {
+  if (!String(raw || "").trim()) {
+    const places = [["Home", os.homedir()], ["Documents", path.join(os.homedir(), "Documents")], ["Desktop", path.join(os.homedir(), "Desktop")], ["source\\repos", path.join(os.homedir(), "source", "repos")]]
+      .filter(([, p]) => fs.existsSync(p)).map(([name, p]) => ({ name, path: p, place: true, git: fs.existsSync(path.join(p, ".git")) }));
+    const drives = [];
+    for (let c = 67; c <= 90; c++) { const d = String.fromCharCode(c) + ":\\"; try { if (fs.existsSync(d)) drives.push({ name: d, path: d, drive: true }); } catch (e) {} }
+    return { ok: true, path: "", parent: null, top: true, folders: places.concat(drives) };
+  }
+  const p = fileTools.resolve(raw, null);
+  const g = fileTools.guard(p, false);
+  if (g) return { ok: false, error: g };
+  let ents;
+  try { ents = await fs.promises.readdir(p, { withFileTypes: true }); } catch (e) { return { ok: false, error: e.code === "ENOENT" ? "No folder at " + p : "Can't open " + p + ": " + e.code }; }
+  const folders = [];
+  let files = 0;
+  for (const e of ents) {
+    if (!e.isDirectory()) { files++; continue; }
+    if (e.name === ".git" || /^\$|^System Volume Information$/i.test(e.name)) continue;
+    const fp = path.join(p, e.name);
+    folders.push({ name: e.name, path: fp, git: fs.existsSync(path.join(fp, ".git")), hidden: e.name.startsWith("."), skip: fileTools.SKIP_DIRS.has(e.name) });
+  }
+  folders.sort((a, b) => a.hidden - b.hidden || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+  const isGit = fs.existsSync(path.join(p, ".git"));
+  const up = path.dirname(p);
+  const repoAbove = isGit ? null : await fileTools.findRepoRoot(up !== p ? up : p);
+  return {
+    ok: true, path: p, parent: up !== p ? up : "", name: path.basename(p) || p,
+    git: isGit, inside: repoAbove && repoAbove !== p ? repoAbove : null,
+    files, folderCount: folders.length, canInit: !isGit && !fileTools.guard(p, true), whyNot: isGit ? "" : fileTools.guard(p, true) || "",
+    suggest: gitignoreFor(p, ents.map((e) => e.name)),
+    folders: folders.slice(0, 1500),
+  };
+}
+
+const GITIGNORE = {
+  node: "node_modules/\ndist/\nbuild/\n.env\n.env.*\nnpm-debug.log*\n*.log\n.DS_Store\nThumbs.db\n",
+  python: "__pycache__/\n*.py[cod]\n.venv/\nvenv/\nenv/\n.env\n*.egg-info/\ndist/\nbuild/\n.pytest_cache/\n.DS_Store\nThumbs.db\n",
+  dotnet: "bin/\nobj/\n.vs/\n*.user\n*.suo\n.DS_Store\nThumbs.db\n",
+  rust: "target/\n.DS_Store\nThumbs.db\n",
+  general: ".env\n*.log\n.DS_Store\nThumbs.db\ndesktop.ini\n",
+};
+function gitignoreFor(dir, names) {
+  const n = new Set((names || []).map((x) => x.toLowerCase()));
+  if (n.has("package.json") || n.has("node_modules")) return "node";
+  if (n.has("requirements.txt") || n.has("pyproject.toml") || n.has("setup.py") || [...n].some((x) => x.endsWith(".py"))) return "python";
+  if ([...n].some((x) => /\.(sln|csproj|fsproj)$/.test(x))) return "dotnet";
+  if (n.has("cargo.toml")) return "rust";
+  return "general";
+}
+
+// git init on the spot: branch main, a .gitignore and README if wanted (never
+// over existing ones), and optionally a first commit of what is there.
+async function codeInit(b) {
+  const p = fileTools.resolve(String(b.root || ""), null);
+  const g = fileTools.guard(p, true);
+  if (g) return { ok: false, error: g };
+  let st = null;
+  try { st = fs.statSync(p); } catch (e) {}
+  if (!st || !st.isDirectory()) return { ok: false, error: "No folder at " + p };
+  if (fs.existsSync(path.join(p, ".git"))) return { ok: false, error: p + " is already a git repo." };
+  const gv = await fileTools.run("git", ["--version"], p, 10000);
+  if (!gv.ok) return { ok: false, error: "Git isn't installed (or isn't on the PATH). Install it from git-scm.com, or ask Jarvis: programs install Git.Git." };
+  let init = await fileTools.run("git", ["init", "-b", "main"], p, 20000);
+  // Git older than 2.28 has no -b.
+  if (!init.ok && /unknown switch|-b/.test(init.err)) { init = await fileTools.run("git", ["init"], p, 20000); if (init.ok) await fileTools.run("git", ["symbolic-ref", "HEAD", "refs/heads/main"], p, 10000); }
+  if (!init.ok) return { ok: false, error: "git init failed: " + init.err.trim() };
+  const made = ["a git repo (branch main)"];
+  const kind = GITIGNORE[b.gitignore] ? b.gitignore : b.gitignore === "none" ? null : gitignoreFor(p, fs.readdirSync(p));
+  if (kind && !fs.existsSync(path.join(p, ".gitignore"))) { fs.writeFileSync(path.join(p, ".gitignore"), GITIGNORE[kind]); made.push("a " + kind + " .gitignore"); }
+  if (b.readme !== false && !fs.readdirSync(p).some((x) => /^readme(\.|$)/i.test(x))) { fs.writeFileSync(path.join(p, "README.md"), "# " + (path.basename(p) || "Project") + "\n"); made.push("a README"); }
+  let commit = null;
+  if (b.commit) {
+    const add = await fileTools.run("git", ["add", "-A"], p, 120000);
+    const c = add.ok ? await fileTools.run("git", ["commit", "-m", String(b.message || "First commit").slice(0, 200)], p, 120000) : add;
+    commit = c.ok ? { ok: true, text: c.out.trim().split(/\r?\n/)[0] } : { ok: false, text: (c.err || c.out).trim().slice(0, 600) };
+    if (c.ok) made.push("a first commit");
+  }
+  const proj = await codeProject(p);
+  return { ok: true, made, commit, project: proj.ok ? proj : null, git: await fileTools.gitStatus(p) };
+}
+
 // The project as the next request sees it: the time, the branch, what has changed.
 async function codeContextLine(c) {
   const g = await fileTools.gitStatus(c.root).catch(() => null);
@@ -4059,6 +4144,24 @@ async function handle(req, res, urlPath) {
         const p = await codeProject(root);
         return json(res, 200, { ok: true, project: p, git: await fileTools.gitStatus(root) });
       });
+    }
+    if (what === "browse" && req.method === "GET") return json(res, 200, await codeBrowse(q.get("path") || ""));
+    if (what === "mkdir" && req.method === "POST") {
+      // A new folder from the folder picker.
+      return H.readJsonBody(req, res, async (b) => {
+        const name = String((b && b.name) || "").trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").replace(/[. ]+$/, "").slice(0, 80);
+        if (!name) return json(res, 400, { ok: false, error: "Give the folder a name." });
+        const p = path.join(fileTools.resolve(String((b && b.parent) || ""), null), name);
+        const g = fileTools.guard(p, true);
+        if (g) return json(res, 400, { ok: false, error: g });
+        if (fs.existsSync(p)) return json(res, 400, { ok: false, error: p + " already exists." });
+        try { fs.mkdirSync(p, { recursive: true }); } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+        return json(res, 200, { ok: true, path: p });
+      });
+    }
+    if (what === "init" && req.method === "POST") {
+      // Making a folder a git repo, on the spot.
+      return H.readJsonBody(req, res, async (b) => json(res, 200, await codeInit(b || {})));
     }
     if (what === "ls" && req.method === "GET") return json(res, 200, await fileTools.listDir(fileTools.resolve(q.get("path") || "", null)));
     if (what === "file" && req.method === "GET") return json(res, 200, await fileTools.readText(fileTools.resolve(q.get("path") || "", null), 1024 * 1024));

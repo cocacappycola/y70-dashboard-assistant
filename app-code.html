@@ -37,6 +37,24 @@
     .row .s { font-size: 11.5px; color: var(--t-sub, #a6a6b3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .row .m { font-size: 10.5px; color: var(--t-muted, #7a7a85); flex-shrink: 0; text-align: right; }
     .grow { flex: 1; min-width: 0; }
+    /* ---- Folder picker ---- */
+    .pick { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 14px; background: var(--t-bg-2, #101014); border: 1px solid var(--t-accent-line, rgba(168,92,214,.35)); }
+    .pick .crumbs { padding: 0; border: 0; background: none; position: static; }
+    .pick .here { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--t-sub, #a6a6b3); }
+    .pick .folders { display: flex; flex-direction: column; max-height: 340px; overflow-y: auto; border-radius: 10px; border: 1px solid var(--t-line, #2c2c33); }
+    .pick .fd { display: flex; gap: 8px; align-items: center; padding: 9px 12px; font-size: 13.5px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,.04); }
+    .pick .fd:active { background: var(--t-accent-soft, rgba(168,92,214,.18)); }
+    .pick .fd .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pick .fd.dim { opacity: .5; }
+    .tag { font-size: 10px; font-weight: 700; letter-spacing: .04em; padding: 1px 7px; border-radius: 6px; background: rgba(255,255,255,.07); color: var(--t-sub, #a6a6b3); flex-shrink: 0; }
+    .tag.git { background: rgba(70,209,138,.16); color: #46d18a; }
+    .tag.warn { background: rgba(255,179,92,.16); color: #ffb35c; }
+    .initbox { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 12px; background: var(--t-surface, #16161a); border: 1px solid var(--t-line, #2c2c33); }
+    .initbox .k { font-size: 13.5px; font-weight: 700; }
+    .initbox .opt { display: flex; gap: 8px; align-items: center; font-size: 12.5px; color: var(--t-sub, #c9c9d3); cursor: pointer; }
+    .initbox .opt input { width: 18px; height: 18px; accent-color: var(--t-accent, #a85cd6); }
+    .initbox .ok { color: #46d18a; font-size: 12.5px; }
+    .btns { display: flex; gap: 6px; flex-wrap: wrap; }
     .line { display: flex; gap: 8px; }
     .line .ui-input { flex: 1; min-width: 0; }
 
@@ -249,6 +267,10 @@
       const go = () => { if (inp.value.trim()) openProject(inp.value.trim()); };
       ob.addEventListener("click", go);
       inp.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+      // Or pick one by tapping through folders.
+      const bb = open.appendChild(el("button", "btn btn--primary btn--sm", pickAt != null ? "Close" : "Browse…"));
+      bb.addEventListener("click", () => { pickAt = pickAt != null ? null : store.get("pickAt", ""); loadProjects(); });
+      if (pickAt != null) box.appendChild(picker());
       const mk = box.appendChild(el("div", "line"));
       const nn = mk.appendChild(el("input", "ui-input"));
       nn.placeholder = "New project name (made in Documents, with git)"; kb(nn);
@@ -272,6 +294,106 @@
       list("Git repos on this PC", r.found || [], null);
       if (!(r.recent || []).length && !(r.found || []).length) box.appendChild(el("div", "note", "No projects found in Documents. Open a folder above, or create one."));
     }
+    // ---- The folder picker: tap through folders, open one, make one, make it a repo ----
+    let pickAt = null;           // the folder being looked at ("" = This PC); null = closed
+    function picker() {
+      const wrap = el("div", "pick");
+      wrap.appendChild(el("div", "note", "Loading…"));
+      getJ("code/browse?path=" + encodeURIComponent(pickAt)).then((r) => drawPicker(wrap, r));
+      return wrap;
+    }
+    function pickGo(p) { pickAt = p; store.set("pickAt", p); const w = $("#projects .pick"); if (w) w.replaceWith(picker()); }
+    function drawPicker(wrap, r) {
+      wrap.innerHTML = "";
+      if (!r.ok) {
+        wrap.appendChild(el("div", "err", esc(r.error || "Can't open that folder.")));
+        const back = el("button", "btn btn--ghost btn--sm", "This PC");
+        back.addEventListener("click", () => pickGo(""));
+        wrap.appendChild(back);
+        return;
+      }
+      // Where we are: This PC › C:\ › Users › …
+      const cr = wrap.appendChild(el("div", "crumbs"));
+      const crumb = (label, p) => { const a = el("a", null, esc(label)); a.addEventListener("click", () => pickGo(p)); cr.appendChild(a); };
+      crumb("This PC", "");
+      if (r.path) {
+        const parts = r.path.split("\\").filter(Boolean);
+        let acc = "";
+        parts.forEach((part, i) => { acc = i === 0 ? part + "\\" : acc + (acc.endsWith("\\") ? "" : "\\") + part; cr.appendChild(el("span", null, "›")); crumb(part, acc); });
+      }
+      if (r.path) {
+        // This folder: what it is, and what can be done with it.
+        const here = wrap.appendChild(el("div", "here"));
+        here.appendChild(el("span", "grow", "<b>" + esc(r.name) + "</b> · " + r.folderCount + " folders, " + r.files + " files"));
+        if (r.git) here.appendChild(el("span", "tag git", "GIT REPO"));
+        else if (r.inside) here.appendChild(el("span", "tag warn", "INSIDE A REPO"));
+        else here.appendChild(el("span", "tag", "NOT A REPO"));
+        const btns = wrap.appendChild(el("div", "btns"));
+        const b = (t, cls, fn) => { const x = el("button", "btn btn--sm " + cls, t); x.addEventListener("click", fn); btns.appendChild(x); return x; };
+        b("Open this folder", "btn--primary", () => openProject(r.path));
+        if (r.canInit) b("Make it a git repo…", "btn--ghost", () => { const ib = wrap.querySelector(".initbox"); if (ib) ib.remove(); else wrap.insertBefore(initBox(r, (res) => enterProject(res.project, res.git)), wrap.querySelector(".folders")); });
+        b("New folder…", "btn--ghost", () => newFolderRow(wrap, r.path));
+        if (r.parent != null) b("Up", "btn--ghost", () => pickGo(r.parent));
+        if (!r.git && !r.canInit && r.whyNot) wrap.appendChild(el("div", "note", esc(r.whyNot)));
+      }
+      const list = wrap.appendChild(el("div", "folders"));
+      if (!r.folders.length) list.appendChild(el("div", "note", "No folders in here."));
+      for (const f of r.folders) {
+        const row = el("div", "fd" + (f.hidden || f.skip ? " dim" : ""), '<span>' + (f.drive ? "💽" : f.place ? "⭐" : "📁") + '</span><span class="nm">' + esc(f.name) + "</span>" + (f.git ? '<span class="tag git">GIT</span>' : ""));
+        row.addEventListener("click", () => pickGo(f.path));
+        list.appendChild(row);
+      }
+    }
+    function newFolderRow(wrap, parent) {
+      if (wrap.querySelector(".newf")) { wrap.querySelector(".newf input").focus(); return; }
+      const row = el("div", "line newf");
+      const inp = kb(row.appendChild(el("input", "ui-input")));
+      inp.placeholder = "New folder in " + parent;
+      const mk = row.appendChild(el("button", "btn btn--primary btn--sm", "Make"));
+      const go = async () => {
+        if (!inp.value.trim()) return;
+        const r = await postJ("code/mkdir", { parent, name: inp.value.trim() });
+        if (!r.ok) { alertLine(wrap, r.error); return; }
+        pickGo(r.path);
+      };
+      mk.addEventListener("click", go);
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+      wrap.insertBefore(row, wrap.querySelector(".folders"));
+      inp.focus();
+    }
+    // "Make it a git repo": the options, then git init on the spot.
+    function initBox(r, done) {
+      const box = el("div", "initbox");
+      box.appendChild(el("div", "k", "Make " + esc(r.name || r.path) + " a git repo"));
+      if (r.inside) box.appendChild(el("div", "prob err", "It is inside the repo " + esc(r.inside) + ". A repo here would be a separate one inside it (the outer repo will see it as a folder it can't look into)."));
+      const ign = el("select", "ui-input");
+      for (const [v, l] of [["node", "Node .gitignore"], ["python", "Python .gitignore"], ["dotnet", ".NET .gitignore"], ["rust", "Rust .gitignore"], ["general", "Basic .gitignore"], ["none", "No .gitignore"]]) ign.appendChild(el("option", null, esc(l))).value = v;
+      ign.value = r.suggest || "general";
+      const opt = (label, on) => { const l = el("label", "opt"); const c = l.appendChild(el("input")); c.type = "checkbox"; c.checked = on; l.appendChild(el("span", null, esc(label))); box.appendChild(l); return c; };
+      box.appendChild(ign);
+      const readme = opt("Add a README.md (if there isn't one)", true);
+      const commit = opt("Commit what's already here" + (r.files ? " (" + r.files + " files at the top level)" : ""), r.files > 0 || r.folderCount > 0);
+      const msg = kb(el("input", "ui-input")); msg.placeholder = "First commit message"; msg.value = "First commit";
+      box.appendChild(msg);
+      commit.addEventListener("change", () => { msg.hidden = !commit.checked; });
+      msg.hidden = !commit.checked;
+      const btns = box.appendChild(el("div", "btns"));
+      const go = el("button", "btn btn--primary btn--sm", "Create repo");
+      const out = el("div", "note");
+      go.addEventListener("click", async () => {
+        go.disabled = true; out.textContent = "Making it…";
+        const res = await postJ("code/init", { root: r.path, gitignore: ign.value, readme: readme.checked, commit: commit.checked, message: msg.value.trim() || "First commit" });
+        go.disabled = false;
+        if (!res.ok) { out.className = "err"; out.textContent = res.error; return; }
+        out.className = "ok";
+        out.textContent = "Made " + res.made.join(", ") + "." + (res.commit && !res.commit.ok ? " The commit didn't work: " + res.commit.text : "");
+        setTimeout(() => done(res), res.commit && !res.commit.ok ? 3500 : 700);
+      });
+      btns.appendChild(go);
+      box.appendChild(out);
+      return box;
+    }
+
     function alertLine(box, msg) { const n = el("div", "err", esc(msg)); box.prepend(n); setTimeout(() => n.remove(), 6000); }
     async function openProject(root) {
       const r = await postJ("code/open", { root });
@@ -550,12 +672,23 @@
 
     // ---- Changes -------------------------------------------------------------------------
     let diffFor = null;
+    let changesSeq = 0;
     async function loadChanges() {
+      // Two loads at once (a tap and a refresh) must not both draw.
+      const seq = ++changesSeq;
       await refreshGit();
+      if (seq !== changesSeq) return;
       const box = $("#v-changes");
       box.innerHTML = "";
       if (!git || !git.git) {
-        box.appendChild(el("div", "note", "Not a git repo. Ask Jarvis to make it one, or say “repo create” in the chat."));
+        // Not a repo yet: make it one right here.
+        box.appendChild(el("div", "note", "This folder isn't a git repo yet."));
+        const r = await getJ("code/browse?path=" + encodeURIComponent(project.root));
+        if (seq !== changesSeq) return;
+        if (r.ok && r.canInit) {
+          const pad = box.appendChild(el("div", "pad"));
+          pad.appendChild(initBox(r, async (res) => { git = res.git; head(); loadChanges(); }));
+        } else if (r.whyNot || r.error) box.appendChild(el("div", "note", esc(r.whyNot || r.error)));
         return;
       }
       const top = box.appendChild(el("div", "fbar", "<b class=\"grow\">" + esc(git.branch || "no branch") + "</b><span>" + (git.upstream ? esc(git.upstream) + (git.ahead ? " · " + git.ahead + " ahead" : "") + (git.behind ? " · " + git.behind + " behind" : "") : "no upstream") + "</span>"));
